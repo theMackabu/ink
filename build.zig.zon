@@ -1,0 +1,20 @@
+.{
+    .name = .ink,
+    .version = "0.15.2",
+    .dependencies = .{
+        .flow_syntax = .{
+            .url = "git+https://github.com/neurocyte/flow-syntax#d6e867378babfd899486547b6e59bf7863f6097e",
+            .hash = "flow_syntax-0.6.0-X8jOoWgVAQBSMU8XHKJgDibqPeo0i3NzXl7GEnSLIzb6",
+        },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis.git#8a9c2d5e1b3778f1ea43c9bd5d325cfa72016584",
+            .hash = "vaxis-0.5.1-BWNV_Bw_CQAIVNh1ekGVzbip25CYBQ_J3kgABnYGFnI4",
+        },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
+            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x9959d74465229de9,
+}
