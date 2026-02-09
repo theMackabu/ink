@@ -3,73 +3,74 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    zig-overlay.url = "github:mitchellh/zig-overlay";
+    systems.url = "github:nix-systems/default";
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    flake-utils,
-    zig-overlay,
-  }:
-    flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"] (
-      system: let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [
-            (final: prev: {
-              zigpkgs = zig-overlay.packages.${system};
-            })
-          ];
-        };
+  outputs =
+    inputs:
+    inputs.flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = import inputs.systems.outPath;
 
-        version = builtins.replaceStrings ["\n"] [""] (builtins.readFile ./ink.version);
-        deps = pkgs.callPackage ./build.zig.zon.nix {};
-      in {
-        packages = {
-          default = pkgs.stdenv.mkDerivation {
+      perSystem =
+        {
+          lib,
+          pkgs,
+          ...
+        }:
+        let
+          zig = pkgs.zig_0_15;
+          fs = lib.fileset;
+          version = lib.pipe ./ink.version [
+            builtins.readFile
+            lib.trim
+          ];
+        in
+        {
+          packages.default = pkgs.stdenv.mkDerivation (finalAttrs: {
             pname = "ink";
             inherit version;
-            src = ./.;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./build.zig
+                ./build.zig.zon
+                ./build.utils.zig
+                ./src
+              ];
+            };
 
-            nativeBuildInputs = [pkgs.zig_0_15];
+            deps = pkgs.callPackage ./build.zig.zon.nix { };
+
+            nativeBuildInputs = [
+              zig.hook
+              pkgs.writableTmpDirAsHomeHook
+            ];
 
             dontConfigure = true;
-            dontInstall = true;
 
-            buildPhase = ''
-              runHook preBuild
+            zigBuildFlags = [
+              "--system"
+              "${finalAttrs.deps}"
+              "-Dversion=${version}"
+            ];
 
-              export HOME=$TMPDIR
-              export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-cache"
-              export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
-
-              mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
-              ln -s ${deps} "$ZIG_GLOBAL_CACHE_DIR/p"
-
-              zig build \
-                --prefix $out \
-                -Dversion="${version}" \
-                -Dcpu=baseline \
-                --color off \
-                install
-
-              runHook postBuild
-            '';
-
-            meta = with pkgs.lib; {
+            meta = {
               description = "A tiny, fast markdown renderer for your terminal";
               homepage = "https://github.com/theMackabu/ink";
-              license = licenses.mit;
+              license = lib.licenses.mit;
               mainProgram = "ink";
             };
+          });
+
+          devShells.default = pkgs.mkShell {
+            nativeBuildInputs = [
+              zig
+            ];
           };
         };
-
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = [pkgs.zigpkgs."0.15.2"];
-        };
-      }
-    );
+    };
 }

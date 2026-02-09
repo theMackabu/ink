@@ -1,9 +1,15 @@
+# Zig
 .zig-cache/
 zig-out/
 /release/
 /debug/
 /build/
 /build-*/
+
+# Nix
+/result
+/.direnv/
+
+# Misc
 /docgen_tmp/
 *.md.json
-result
