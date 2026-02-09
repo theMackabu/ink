@@ -1,6 +1,7 @@
 const std = @import("std");
 const node = @import("node.zig");
 const hl = @import("highlight.zig");
+const kitty = @import("kitty.zig");
 
 const Node = node.Node;
 const Writer = node.Writer;
@@ -77,6 +78,7 @@ const Ctx = struct {
   wrap_width: u16 = 0,
   col: *u16,
   indent_ctx: *u32,
+  base_path: Bytes = "",
 
   fn hasNestedItems(nd: *Node) bool {
     var last: ?*Node = nd.children;
@@ -223,6 +225,26 @@ const Ctx = struct {
   }
 
   fn renderImage(self: Ctx, img: Node.Link, style: Style) anyerror!void {
+    if (img.url.len > 0 and !self.tui) {
+      if (kitty.renderFile(self.w, img.url, self.base_path, self.margin) catch false) {
+        if (img.label.len > 0) {
+          try self.writeMargin();
+          try self.w.writeAll(ansi.DIM ++ ansi.ITALIC);
+          try self.w.writeAll(img.label);
+          try self.w.writeAll(ansi.RESET);
+          try self.w.writeAll("\n");
+        }
+        try self.restoreStyle(style);
+        return;
+      }
+    }
+    if (self.tui and img.url.len > 0) {
+      try self.w.writeAll("\x1b_I;");
+      try self.w.writeAll(img.url);
+      try self.w.writeAll(";");
+      try self.w.writeAll(img.label);
+      try self.w.writeAll("\x1b\\");
+    }
     try self.w.writeAll(ansi.GRAY);
     try self.w.writeAll("Image: ");
     try self.w.writeAll(ansi.ITALIC);
@@ -684,6 +706,7 @@ pub const Config = struct {
   highlighter: ?*hl.Highlighter = null,
   tui: bool = false,
   line_wrap_percent: u8 = 90,
+  base_path: Bytes = "",
 };
 
 pub fn render(w: Writer, n: ?*Node, config: Config) anyerror!void {
@@ -700,6 +723,7 @@ pub fn render(w: Writer, n: ?*Node, config: Config) anyerror!void {
     .wrap_width = wrap_w,
     .col = &col,
     .indent_ctx = &indent_ctx,
+    .base_path = config.base_path,
   };
   try ctx.styled(n, 0, .{});
 }

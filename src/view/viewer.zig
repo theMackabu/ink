@@ -10,6 +10,7 @@ const Key = types.Key;
 const Line = types.Line;
 const HeadingEntry = types.HeadingEntry;
 const FragmentLink = types.FragmentLink;
+const ImageEntry = types.ImageEntry;
 const WrapPoint = types.WrapPoint;
 const SearchState = search.SearchState;
 const WrapLayout = wrap_mod.WrapLayout;
@@ -39,11 +40,17 @@ pub fn digitCount(n: usize) usize {
   return d;
 }
 
+pub const LoadedImage = struct {
+  image: vaxis.Image,
+  url: Bytes,
+};
+
 pub const Viewer = struct {
   alloc: std.mem.Allocator,
   lines: []const Line,
   headings: []const HeadingEntry,
   links: []const FragmentLink,
+  images: []const ImageEntry = &.{},
   scroll: usize = 0,
   search: SearchState,
   filename: Bytes,
@@ -65,6 +72,9 @@ pub const Viewer = struct {
   wrap: WrapLayout,
   toast_msg: ?[]const u8 = null,
   toast_time: ?std.time.Instant = null,
+  vx: ?*vaxis.Vaxis = null,
+  tty_writer: ?*std.Io.Writer = null,
+  loaded_images: std.ArrayListUnmanaged(LoadedImage) = .empty,
 
   info_buf: [32]u8 = undefined,
   info_slice: []const u8 = "",
@@ -225,6 +235,81 @@ pub const Viewer = struct {
     self.toast_time = std.time.Instant.now() catch null;
   }
 
+  pub fn deinitImages(self: *Viewer) void {
+    if (self.vx) |vx| {
+      if (self.tty_writer) |tw| {
+        for (self.loaded_images.items) |li| vx.freeImage(tw, li.image.id);
+      }
+    }
+    self.loaded_images.deinit(self.alloc);
+  }
+
+  fn getLoadedImage(self: *const Viewer, url: Bytes) ?vaxis.Image {
+    for (self.loaded_images.items) |li| {
+      if (std.mem.eql(u8, li.url, url)) return li.image;
+    }
+    return null;
+  }
+
+  fn loadImageFor(self: *Viewer, url: Bytes) ?vaxis.Image {
+    if (self.getLoadedImage(url)) |img| return img;
+    const vx = self.vx orelse return null;
+    const tw = self.tty_writer orelse return null;
+
+    const base_dir = std.fs.path.dirname(self.filename) orelse ".";
+    const full_path = if (std.fs.path.isAbsolute(url))
+      url
+    else
+      std.fs.path.join(self.alloc, &.{ base_dir, url }) catch return null;
+
+    const img = vx.loadImage(self.alloc, tw, .{ .path = full_path }) catch return null;
+    self.loaded_images.append(self.alloc, .{ .image = img, .url = url }) catch return null;
+    return img;
+  }
+
+  fn isImageLine(self: *Viewer, line_idx: usize) bool {
+    for (self.images) |img| {
+      if (img.line_idx == line_idx) {
+        return self.loadImageFor(img.url) != null;
+      }
+    }
+    return false;
+  }
+
+  fn drawImage(self: *Viewer, win: vaxis.Window, row: u16, line_idx: usize) u16 {
+    for (self.images) |img| {
+      if (img.line_idx == line_idx) {
+        const loaded = self.loadImageFor(img.url) orelse return 1;
+        const gw = self.gutterWidth();
+        const gutter_end = gw + @as(u16, if (gw > 0) 1 else 0);
+        const cw = self.contentWidth();
+        const cell_size = loaded.cellSize(win) catch return 1;
+        const img_h = @min(cell_size.rows, win.height -| row);
+        const img_w = @min(cell_size.cols, cw);
+        const child = win.child(.{
+          .x_off = gutter_end,
+          .y_off = row,
+          .width = img_w,
+          .height = img_h,
+        });
+        loaded.draw(child, .{ .scale = .contain }) catch return 1;
+
+        var total_h = @max(1, img_h);
+        if (img.alt.len > 0 and row + total_h < win.height) {
+          const alt_style: vaxis.Style = .{
+            .fg = .{ .rgb = .{ 120, 120, 130 } },
+            .italic = true,
+            .dim = true,
+          };
+          _ = writeStr(win, gutter_end, row + total_h, img.alt, alt_style);
+          total_h += 1;
+        }
+        return total_h;
+      }
+    }
+    return 1;
+  }
+
   pub fn draw(self: *Viewer, win: vaxis.Window) void {
     win.clear();
     self.drawContent(win);
@@ -250,6 +335,12 @@ pub const Viewer = struct {
       const is_yank_target = self.yank_active and self.yank_target != null and pos.line_idx == self.yank_target.?;
       if ((self.show_lines or self.yank_active) and pos.wrap_row == 0) {
         self.drawLineNumber(content, row, pos.line_idx, is_current_match or is_yank_target);
+      }
+
+      if (pos.wrap_row == 0 and self.isImageLine(pos.line_idx)) {
+        const img_rows = self.drawImage(content, row, pos.line_idx);
+        row += img_rows -| 1;
+        continue;
       }
 
       const wp = self.wrap.wrapPoint(pos.line_idx, pos.wrap_row);

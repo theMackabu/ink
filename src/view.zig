@@ -5,6 +5,7 @@ const parser = @import("parser.zig");
 const output = @import("output.zig");
 const hl = @import("highlight.zig");
 
+
 pub const types = @import("view/types.zig");
 pub const parse = @import("view/parse.zig");
 pub const search = @import("view/search.zig");
@@ -71,6 +72,7 @@ fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_re
   v.lines = new_parsed.lines;
   v.headings = new_parsed.headings;
   v.links = new_parsed.links;
+  v.images = new_parsed.images;
   v.num_w = @intCast(viewer.digitCount(new_parsed.lines.len) + 1);
   v.wrap.width = 0;
   v.scroll = old_scroll;
@@ -156,6 +158,7 @@ pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResul
     .lines = parsed.lines,
     .headings = parsed.headings,
     .links = parsed.links,
+    .images = parsed.images,
     .filename = filename,
     .num_w = @intCast(viewer.digitCount(parsed.lines.len) + 1),
     .show_lines = mem.show_lines,
@@ -164,10 +167,13 @@ pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResul
     .has_picker = opts.has_picker,
     .search = SearchState.init(alloc),
     .wrap = WrapLayout.init(alloc),
+    .vx = &tui.vx,
+    .tty_writer = tui.tty.writer(),
   };
   
   defer v.search.deinit();
   defer v.wrap.deinit();
+  defer v.deinitImages();
   defer parsed.deinit(alloc);
 
   var watcher: ?watch.Watcher = null;
@@ -211,7 +217,9 @@ pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResul
           if (action == .quit) return .quit;
           if (action == .back_to_picker) return .back_to_picker;
           if (action == .edit) return .edit;
-          if (action == .reload) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+          if (action == .reload) {
+            refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+          }
           if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
           if (action == .outline) {
             if (outline.run(tui, v.headings) catch null) |result| {

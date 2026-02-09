@@ -7,6 +7,7 @@ const Segment = types.Segment;
 const Line = types.Line;
 const HeadingEntry = types.HeadingEntry;
 const FragmentLink = types.FragmentLink;
+const ImageEntry = types.ImageEntry;
 const ParseResult = types.ParseResult;
 
 pub fn parseSgr(seq: Bytes, current: vaxis.Style) vaxis.Style {
@@ -99,6 +100,7 @@ fn parseApcPayload(
   line_idx: usize,
   headings: *std.ArrayListUnmanaged(HeadingEntry),
   links: *std.ArrayListUnmanaged(FragmentLink),
+  images: *std.ArrayListUnmanaged(ImageEntry),
   link_state: *LinkState,
   no_wrap: *bool,
   alloc: std.mem.Allocator,
@@ -129,6 +131,15 @@ fn parseApcPayload(
         .slug = slug, .line_idx = line_idx, 
         .raw = raw_text, .h_count = h_count 
       });
+    },
+    'I' => {
+      if (std.mem.indexOfScalar(u8, data, ';')) |sep| {
+        try images.append(alloc, .{
+          .line_idx = line_idx,
+          .url = data[0..sep],
+          .alt = data[sep + 1 ..],
+        });
+      }
     },
     'L' => {
       link_state.slug = data;
@@ -184,6 +195,7 @@ fn processEscapeSequence(
   line_idx: usize,
   headings: *std.ArrayListUnmanaged(HeadingEntry),
   links: *std.ArrayListUnmanaged(FragmentLink),
+  images: *std.ArrayListUnmanaged(ImageEntry),
   no_wrap: *bool,
   alloc: std.mem.Allocator,
 ) !void {
@@ -196,7 +208,7 @@ fn processEscapeSequence(
 
   if (next == '_') {
     if (parseApc(data, i)) |payload| {
-      try parseApcPayload(payload, line_idx, headings, links, link_state, no_wrap, alloc);
+      try parseApcPayload(payload, line_idx, headings, links, images, link_state, no_wrap, alloc);
     } else {
       i.* += 1;
     } return;
@@ -228,6 +240,7 @@ fn processLine(
   style: *vaxis.Style,
   headings: *std.ArrayListUnmanaged(HeadingEntry),
   links: *std.ArrayListUnmanaged(FragmentLink),
+  images: *std.ArrayListUnmanaged(ImageEntry),
 ) !Line {
   var segments: std.ArrayListUnmanaged(Segment) = .empty;
   var raw: std.ArrayListUnmanaged(u8) = .empty;
@@ -241,7 +254,7 @@ fn processLine(
         line_data, &i,
         style, &link_state,
         line_idx, headings,
-        links, &no_wrap, alloc,
+        links, images, &no_wrap, alloc,
       ); continue;
     }
 
@@ -272,6 +285,7 @@ pub fn parseAnsiLines(alloc: std.mem.Allocator, input: Bytes) !ParseResult {
   var lines: std.ArrayListUnmanaged(Line) = .empty;
   var headings: std.ArrayListUnmanaged(HeadingEntry) = .empty;
   var links: std.ArrayListUnmanaged(FragmentLink) = .empty;
+  var images: std.ArrayListUnmanaged(ImageEntry) = .empty;
   var pos: usize = 0;
   var style: vaxis.Style = .{};
 
@@ -285,9 +299,12 @@ pub fn parseAnsiLines(alloc: std.mem.Allocator, input: Bytes) !ParseResult {
     if (at_end and line_start == pos) break;
 
     const line_idx = lines.items.len;
-    const line = try processLine(alloc, line_data, line_idx, &style, &headings, &links);
+    const line = try processLine(
+      alloc, line_data, line_idx, 
+      &style, &headings, &links, &images
+    );
+    
     try lines.append(alloc, line);
-
     if (at_end and line_data.len > 0) break;
   }
 
@@ -295,5 +312,6 @@ pub fn parseAnsiLines(alloc: std.mem.Allocator, input: Bytes) !ParseResult {
     .lines = try lines.toOwnedSlice(alloc),
     .headings = try headings.toOwnedSlice(alloc),
     .links = try links.toOwnedSlice(alloc),
+    .images = try images.toOwnedSlice(alloc),
   };
 }

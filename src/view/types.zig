@@ -31,6 +31,12 @@ pub const FragmentLink = struct {
   slug: Bytes,
 };
 
+pub const ImageEntry = struct {
+  line_idx: usize,
+  url: Bytes,
+  alt: Bytes,
+};
+
 pub const HeadingEntry = struct {
   slug: Bytes,
   line_idx: usize,
@@ -136,6 +142,7 @@ pub const ParseResult = struct {
   lines: []const Line,
   headings: []const HeadingEntry,
   links: []const FragmentLink,
+  images: []const ImageEntry,
 
   pub fn deinit(self: ParseResult, alloc: std.mem.Allocator) void {
     for (self.lines) |line| {
@@ -145,6 +152,7 @@ pub const ParseResult = struct {
     alloc.free(self.lines);
     alloc.free(self.headings);
     alloc.free(self.links);
+    alloc.free(self.images);
   }
 };
 

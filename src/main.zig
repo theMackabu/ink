@@ -40,7 +40,23 @@ pub fn main() !void {
   const watching = res.args.watch != 0;
   const timing = res.args.timing != 0;
 
-  const path = res.positionals[0] orelse {
+  const path = blk: {
+    const arg = res.positionals[0] orelse break :blk @as(?[]const u8, null);
+    var dir = std.fs.cwd().openDir(arg, .{ .iterate = true }) catch {
+      break :blk @as(?[]const u8, arg);
+    }; defer dir.close();
+
+    var found: ?[]const u8 = null; var count: usize = 0;
+    var iter = dir.iterate(); while (iter.next() catch null) |entry| {
+      if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".md")) {
+        if (count == 0) found = std.fs.path.join(allocator, &.{ arg, entry.name }) catch null;
+        count += 1; if (count > 1) break;
+      }
+    }
+    if (count == 1) { if (found) |f| break :blk @as(?[]const u8, f); }
+    ctx.printf("\x1b[1;31merror\x1b[0m: directory \x1b[33m'{s}'\x1b[0m contains {d} .md files (expected 1)\n", .{ arg, count });
+    std.process.exit(1);
+  } orelse {
     if (res.args.json != 0) {
       ctx.printf("usage: ink --json <file.md>\n", .{});
       std.process.exit(1);
@@ -205,9 +221,13 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
   const w = &stdout.interface;
   defer stdout.interface.flush() catch {};
 
+  const base_dir = std.fs.path.dirname(path) orelse ".";
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-  try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin, .line_wrap_percent = mem.line_wrap_percent });
-  try w.writeAll("\n");
+  
+  try ink.render(w, root, .{ 
+    .highlighter = &highlighter, .margin = mem.margin, 
+    .line_wrap_percent = mem.line_wrap_percent, .base_path = base_dir 
+  }); try w.writeAll("\n");
 
   if (timing) {
     const elapsed: f64 = @floatFromInt(end.since(start));
@@ -264,8 +284,13 @@ fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: boo
 
       try w.writeAll("\x1b[H\x1b[2J\x1b[3J");
 
+      const base_dir = std.fs.path.dirname(path) orelse ".";
       var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-      try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin, .line_wrap_percent = mem.line_wrap_percent });
+      
+      try ink.render(w, root, .{ 
+        .highlighter = &highlighter, .margin = mem.margin, 
+        .line_wrap_percent = mem.line_wrap_percent, .base_path = base_dir 
+      });
 
       if (timing) {
         const elapsed: f64 = @floatFromInt(end.since(start));
