@@ -121,13 +121,19 @@ pub const Tui = struct {
   }
 
   pub fn suspendForEditor(self: *Tui) void {
-    self.vx.setMouseMode(self.tty.writer(), false) catch {};
-    self.vx.exitAltScreen(self.tty.writer()) catch {};
+    self.vx.resetState(self.tty.writer()) catch {};
+    self.loop.stop();
+    std.posix.tcsetattr(self.tty.fd, .FLUSH, self.tty.termios) catch {};
   }
 
   pub fn resumeFromEditor(self: *Tui) void {
+    _ = vaxis.Tty.makeRaw(self.tty.fd) catch {};
+    self.loop.start() catch {};
     self.vx.enterAltScreen(self.tty.writer()) catch {};
     self.vx.setMouseMode(self.tty.writer(), true) catch {};
+    if (vaxis.Tty.getWinsize(self.tty.fd)) |ws| {
+      self.vx.resize(self.alloc, self.tty.writer(), ws) catch {};
+    } else |_| {}
   }
 
   pub fn deinit(self: *Tui) void {

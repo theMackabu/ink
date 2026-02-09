@@ -74,6 +74,9 @@ const Ctx = struct {
   margin: u16,
   show_urls: bool,
   tui: bool = false,
+  wrap_width: u16 = 0,
+  col: *u16,
+  indent_ctx: *u32,
 
   fn hasNestedItems(nd: *Node) bool {
     var last: ?*Node = nd.children;
@@ -87,6 +90,46 @@ const Ctx = struct {
   fn writeMargin(self: Ctx) anyerror!void {
     var i: u16 = 0;
     while (i < self.margin) : (i += 1) try self.w.writeAll(" ");
+  }
+
+  fn wrapIndent(self: Ctx) u16 {
+    return self.margin + @as(u16, @intCast(self.indent_ctx.*));
+  }
+
+  fn writeWrapped(self: Ctx, txt: Bytes) anyerror!void {
+    if (self.tui or self.wrap_width == 0) {
+      try self.w.writeAll(txt);
+      self.col.* +|= @intCast(txt.len);
+      return;
+    }
+
+    var remaining = txt;
+    while (remaining.len > 0) {
+      const avail = self.wrap_width -| self.col.*;
+      if (avail >= remaining.len) {
+        try self.w.writeAll(remaining);
+        self.col.* +|= @intCast(remaining.len);
+        return;
+      }
+
+      if (std.mem.lastIndexOfScalar(u8, remaining[0..avail], ' ')) |bp| {
+        try self.w.writeAll(remaining[0..bp]);
+        remaining = remaining[bp + 1 ..];
+      } else if (std.mem.indexOfScalar(u8, remaining[avail..], ' ')) |rel| {
+        try self.w.writeAll(remaining[0 .. avail + rel]);
+        remaining = remaining[avail + rel + 1 ..];
+      } else {
+        try self.w.writeAll(remaining);
+        self.col.* +|= @intCast(remaining.len);
+        return;
+      }
+
+      try self.w.writeAll("\n");
+      const indent = self.wrapIndent();
+      var i: u16 = 0;
+      while (i < indent) : (i += 1) try self.w.writeAll(" ");
+      self.col.* = indent;
+    }
   }
 
   fn styled(self: Ctx, n: ?*Node, depth: u32, style: Style) anyerror!void {
@@ -110,6 +153,7 @@ const Ctx = struct {
     try self.w.writeAll(ansi.BG_GRAY ++ ansi.BRIGHT_WHITE ++ " ");
     try self.w.writeAll(txt);
     try self.w.writeAll(" " ++ ansi.RESET);
+    self.col.* +|= @intCast(txt.len + 2);
     try self.restoreStyle(style);
   }
 
@@ -216,8 +260,11 @@ const Ctx = struct {
     try self.writeMargin();
     try self.w.writeAll(h.color);
     try self.w.writeAll(h.prefix);
+    self.col.* = self.margin + @as(u16, @intCast(h.prefix.len));
+    self.indent_ctx.* = @intCast(h.prefix.len);
     try self.styled(nd.children, depth, .{ .ambient = h.color });
     try self.w.writeAll(ansi.RESET ++ "\n");
+    self.col.* = 0;
   }
 
   fn renderParagraph(self: Ctx, nd: *Node, depth: u32, quoted: bool) anyerror!void {
@@ -231,41 +278,63 @@ const Ctx = struct {
     }
     try self.w.writeAll("\n");
     try self.writeMargin();
+    self.col.* = self.margin;
+    self.indent_ctx.* = 0;
     try self.styled(nd.children, depth, .{});
     try self.w.writeAll("\n");
+    self.col.* = 0;
   }
 
   fn renderListItem(self: Ctx, nd: *Node, li: node.Node.List, depth: u32, quoted: bool) anyerror!void {
     if (!quoted and li.first) try self.w.writeAll("\n");
     if (!quoted) try self.writeMargin();
-    try self.writeIndent(if (quoted) @as(u32, li.indent) + 1 else depth + li.indent);
+    const indent = if (quoted) @as(u32, li.indent) + 1 else depth + li.indent;
+    try self.writeIndent(indent);
     try self.w.writeAll(ansi.CYAN ++ "•" ++ ansi.RESET ++ " ");
+    const prefix = self.margin + @as(u16, @intCast(indent)) + 2;
+    self.col.* = prefix;
+    self.indent_ctx.* = indent + 2;
     try self.styled(nd.children, depth, .{});
+    self.col.* = 0;
+    self.indent_ctx.* = 0;
     if (!quoted and !hasNestedItems(nd)) try self.w.writeAll("\n");
   }
 
   fn renderOrderedItem(self: Ctx, nd: *Node, ol: Node.Ordered, depth: u32, quoted: bool) anyerror!void {
     if (!quoted and ol.first) try self.w.writeAll("\n");
     if (!quoted) try self.writeMargin();
-    try self.writeIndent(if (quoted) @as(u32, ol.indent) + 1 else depth + ol.indent);
+    const indent = if (quoted) @as(u32, ol.indent) + 1 else depth + ol.indent;
+    try self.writeIndent(indent);
+    const num_len: u32 = if (ol.number >= 100) 4 else if (ol.number >= 10) 3 else 2;
+    const extra: u32 = if (ol.suffix != null) 1 else 0;
     if (ol.suffix) |s| try self.w.print(ansi.CYAN ++ "{d}{c}." ++ ansi.RESET ++ " ", .{ ol.number, s })
     else try self.w.print(ansi.CYAN ++ "{d}." ++ ansi.RESET ++ " ", .{ol.number});
+    const prefix = self.margin + @as(u16, @intCast(indent)) + @as(u16, @intCast(num_len + extra)) + 1;
+    self.col.* = prefix;
+    self.indent_ctx.* = indent + num_len + extra + 1;
     try self.styled(nd.children, depth, .{});
+    self.col.* = 0;
+    self.indent_ctx.* = 0;
     if (!quoted and !hasNestedItems(nd)) try self.w.writeAll("\n");
   }
 
   fn renderTaskItem(self: Ctx, nd: *Node, ti: Node.Task, depth: u32, quoted: bool) anyerror!void {
     if (!quoted and ti.first) try self.w.writeAll("\n");
     if (!quoted) try self.writeMargin();
-    try self.writeIndent(if (quoted) @as(u32, ti.indent) + 1 else depth + ti.indent);
+    const indent = if (quoted) @as(u32, ti.indent) + 1 else depth + ti.indent;
+    try self.writeIndent(indent);
     if (ti.checked) {
       try self.w.writeAll(ansi.LIGHT_GRAY ++ "[" ++ ansi.GREEN ++ "✓" ++ ansi.LIGHT_GRAY ++ "] " ++ ansi.RESET);
-      try self.styled(nd.children, depth, .{});
-      try self.w.writeAll(ansi.RESET);
     } else {
       try self.w.writeAll(ansi.LIGHT_GRAY ++ "[ ]" ++ ansi.RESET ++ " ");
-      try self.styled(nd.children, depth, .{});
     }
+    const prefix = self.margin + @as(u16, @intCast(indent)) + 4;
+    self.col.* = prefix;
+    self.indent_ctx.* = indent + 4;
+    try self.styled(nd.children, depth, .{});
+    if (ti.checked) try self.w.writeAll(ansi.RESET);
+    self.col.* = 0;
+    self.indent_ctx.* = 0;
     if (!quoted) try self.w.writeAll("\n");
   }
 
@@ -486,7 +555,7 @@ const Ctx = struct {
   
   fn renderNode(self: Ctx, nd: *Node, depth: u32, style: Style) anyerror!void {
     switch (nd.kind) {
-      .text => |txt| try self.w.writeAll(txt),
+      .text => |txt| try self.writeWrapped(txt),
       .bold => try self.renderBold(nd, depth, style),
       .italic => try self.renderItalic(nd, depth, style),
       .code => |txt| try self.renderCode(txt, style),
@@ -506,6 +575,7 @@ const Ctx = struct {
       .linebreak => {
         try self.w.writeAll("\n");
         try self.writeMargin();
+        self.col.* = self.margin;
       },
     }
   }
@@ -613,14 +683,23 @@ pub const Config = struct {
   show_urls: bool = true,
   highlighter: ?*hl.Highlighter = null,
   tui: bool = false,
+  line_wrap_percent: u8 = 90,
 };
 
 pub fn render(w: Writer, n: ?*Node, config: Config) anyerror!void {
+  var col: u16 = 0;
+  var indent_ctx: u32 = 0;
+  const tw = termWidth();
+  const pct: f64 = @as(f64, @floatFromInt(@min(config.line_wrap_percent, 100))) / 100.0;
+  const wrap_w: u16 = if (config.tui) 0 else @max(20, @as(u16, @intFromFloat(@as(f64, @floatFromInt(tw)) * pct)));
   const ctx: Ctx = .{ .w = w, 
     .highlighter = config.highlighter,
     .margin = config.margin,
     .show_urls = config.show_urls,
     .tui = config.tui,
+    .wrap_width = wrap_w,
+    .col = &col,
+    .indent_ctx = &indent_ctx,
   };
   try ctx.styled(n, 0, .{});
 }

@@ -74,7 +74,7 @@ pub const Viewer = struct {
   pos_slice: []const u8 = "",
 
   pub fn contentHeight(self: *const Viewer) u16 {
-    const footer_h: u16 = if (self.show_help) 8 else 1;
+    const footer_h: u16 = if (self.show_help) 9 else 1;
     return self.term_h -| footer_h;
   }
 

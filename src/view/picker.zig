@@ -303,6 +303,12 @@ const Picker = struct {
     const h = self.listHeight();
     const list = win.child(.{ .y_off = 2, .height = @intCast(h) });
 
+    if (self.filtered_rows.len == 0) {
+      const msg = if (self.search_state.query.items.len > 0) "No matches found." else "No files found.";
+      _ = writeStr(list, 2, 1, msg, .{ .fg = .{ .rgb = .{ 100, 100, 120 } } });
+      return;
+    }
+
     var row: u16 = 0;
     while (row < h) : (row += 1) {
       const idx = self.scroll + row;
@@ -372,7 +378,7 @@ const Picker = struct {
     const footer_h: u16 = if (!self.show_help) 1
       else if (self.search_state.active) 3
       else 4;
-    const footer_y = win.height -| (footer_h);
+    const footer_y = win.height -| (footer_h + 1);
     const footer = win.child(.{ .y_off = footer_y, .height = footer_h, .x_off = 2 });
 
     if (self.show_help) {

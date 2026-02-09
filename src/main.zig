@@ -61,11 +61,7 @@ pub fn main() !void {
       defer allocator.free(result.path);
 
       switch (result.action) {
-        .edit => {
-          tui.suspendForEditor();
-          launchEditor(result.path, ctx);
-          tui.resumeFromEditor();
-        },
+        .edit => handleEditor(tui, result.path, ctx),
         .view => if (try viewLoop(tui, .{
           .path = result.path,
           .watching = watching,
@@ -116,17 +112,23 @@ const TuiOptions = struct {
   has_picker: bool,
 };
 
-fn viewLoop(tui: *ink.tui.Tui, opts: TuiOptions, ctx: cli.Ctx) !bool {
-  while (true) {
-    switch (try launchTui(tui, opts)) {
-      .quit => return true,
-      .back_to_picker => return false,
-      .edit => launchEditor(opts.path, ctx),
-    }
-  }
+const LaunchResult = enum { 
+  quit, back_to_picker, edit 
+};
+
+fn handleEditor(tui: *ink.tui.Tui, path: []const u8, ctx: cli.Ctx) void {
+  tui.suspendForEditor();
+  launchEditor(path, ctx);
+  tui.resumeFromEditor();
 }
 
-const LaunchResult = enum { quit, back_to_picker, edit };
+fn viewLoop(tui: *ink.tui.Tui, opts: TuiOptions, ctx: cli.Ctx) !bool {
+  while (true) switch (try launchTui(tui, opts)) {
+    .quit => return true,
+    .back_to_picker => return false,
+    .edit => handleEditor(tui, opts.path, ctx),
+  }
+}
 
 fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {
   const alloc = tui.alloc;
@@ -176,13 +178,13 @@ fn launchEditor(path: []const u8, ctx: cli.Ctx) void {
 
 fn readFile(arena: *ink.Arena, path: []const u8, ctx: cli.Ctx) ?[]const u8 {
   const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-    ctx.printf("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
+    ctx.printf("\x1b[1;31merror\x1b[0m: cannot open \x1b[33m'{s}'\x1b[0m: {s}\n", .{ path, @errorName(err) });
     std.process.exit(1);
   };
   defer file.close();
 
   return file.readToEndAlloc(arena.allocator(), std.math.maxInt(usize)) catch |err| {
-    ctx.printf("error: cannot read '{s}': {s}\n", .{ path, @errorName(err) });
+    ctx.printf("\x1b[1;31merror\x1b[0m: cannot read \x1b[33m'{s}'\x1b[0m: {s}\n", .{ path, @errorName(err) });
     std.process.exit(1);
   };
 }
@@ -204,7 +206,7 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
   defer stdout.interface.flush() catch {};
 
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-  try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin });
+  try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin, .line_wrap_percent = mem.line_wrap_percent });
   try w.writeAll("\n");
 
   if (timing) {
@@ -216,6 +218,11 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
 }
 
 fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bool, mem: Memory) !void {
+  _ = std.fs.cwd().statFile(path) catch {
+    ctx.printf("\x1b[1;31merror\x1b[0m: cannot open \x1b[33m'{s}'\x1b[0m: file not found\n", .{path});
+    std.process.exit(1);
+  };
+
   const stdin_fd = std.posix.STDIN_FILENO;
   const orig_termios = std.posix.tcgetattr(stdin_fd) catch null;
   if (orig_termios) |orig| {
@@ -258,7 +265,7 @@ fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: boo
       try w.writeAll("\x1b[H\x1b[2J\x1b[3J");
 
       var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-      try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin });
+      try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin, .line_wrap_percent = mem.line_wrap_percent });
 
       if (timing) {
         const elapsed: f64 = @floatFromInt(end.since(start));
