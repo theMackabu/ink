@@ -11,12 +11,14 @@ pub const search = @import("view/search.zig");
 pub const wrap = @import("view/wrap.zig");
 pub const viewer = @import("view/viewer.zig");
 pub const watch = @import("view/watch.zig");
+pub const memory = @import("view/memory.zig");
 
 const Bytes = types.Bytes;
 const Event = types.Event;
 const SearchState = search.SearchState;
 const WrapLayout = wrap.WrapLayout;
 const Viewer = viewer.Viewer;
+const Memory = memory.Memory;
 
 fn reloadContent(alloc: std.mem.Allocator, path: Bytes) !struct { rendered: Bytes, arena: *node.Arena } {
   var arena = try alloc.create(node.Arena);
@@ -46,16 +48,20 @@ fn reloadContent(alloc: std.mem.Allocator, path: Bytes) !struct { rendered: Byte
 
 pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching: bool) !void {
   const parsed = try parse.parseAnsiLines(alloc, rendered);
+  const mem = Memory.load(alloc);
 
   var v: Viewer = .{
+    .alloc = alloc,
     .lines = parsed.lines,
     .headings = parsed.headings,
     .links = parsed.links,
     .filename = filename,
     .num_w = @intCast(viewer.digitCount(parsed.lines.len) + 1),
+    .show_lines = mem.show_lines,
     .search = SearchState.init(alloc),
     .wrap = WrapLayout.init(alloc),
   };
+  
   defer v.search.deinit();
   defer v.wrap.deinit();
 

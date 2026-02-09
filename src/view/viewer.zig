@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const types = @import("types.zig");
 const search = @import("search.zig");
 const wrap_mod = @import("wrap.zig");
+const mem = @import("memory.zig");
 
 const Bytes = types.Bytes;
 const Key = types.Key;
@@ -39,6 +40,7 @@ pub fn digitCount(n: usize) usize {
 }
 
 pub const Viewer = struct {
+  alloc: std.mem.Allocator,
   lines: []const Line,
   headings: []const HeadingEntry,
   links: []const FragmentLink,
@@ -46,6 +48,7 @@ pub const Viewer = struct {
   search: SearchState,
   filename: Bytes,
   num_w: u16,
+  show_lines: bool = false,
   term_h: u16 = 24,
   term_w: u16 = 80,
   dragging: bool = false,
@@ -62,8 +65,13 @@ pub const Viewer = struct {
     return self.term_h -| 1;
   }
 
+  pub fn gutterWidth(self: *const Viewer) u16 {
+    return if (self.show_lines) self.num_w else 0;
+  }
+
   pub fn contentWidth(self: *const Viewer) u16 {
-    const taken = self.num_w + 1 + 1;
+    const gw = self.gutterWidth();
+    const taken = gw + @as(u16, if (gw > 0) 1 else 0) + 1;
     const full = @max(1, self.term_w -| taken);
     return @max(1, @as(u16, @intFromFloat(@as(f64, @floatFromInt(full)) * 0.9)));
   }
@@ -155,17 +163,19 @@ pub const Viewer = struct {
     const pos = self.wrap.visualToLogical(vrow);
     if (pos.wrap_row != 0) return null;
 
-    const text_col = if (mouse_col >= self.num_w + 1)
-      @as(u16, @intCast(mouse_col)) - self.num_w - 1
-    else
-      return null;
+    const gw = self.gutterWidth();
+    const gutter_end = gw + @as(u16, if (gw > 0) 1 else 0);
+    const text_col = if (mouse_col >= gutter_end)
+      @as(u16, @intCast(mouse_col)) - gutter_end
+    else return null;
 
     for (self.links) |link| {
-      if (link.line_idx == pos.line_idx and text_col >= link.col_start and text_col < link.col_end) {
-        return link.slug;
-      }
-    }
-    return null;
+      if (
+        link.line_idx == pos.line_idx 
+        and text_col >= link.col_start 
+        and text_col < link.col_end
+      ) return link.slug;
+    } return null;
   }
 
   pub fn draw(self: *Viewer, win: vaxis.Window) void {
@@ -189,7 +199,7 @@ pub const Viewer = struct {
       const is_match = self.isMatchLine(pos.line_idx);
       const is_current_match = self.isCurrentMatch(pos.line_idx);
 
-      if (pos.wrap_row == 0) {
+      if (self.show_lines and pos.wrap_row == 0) {
         self.drawLineNumber(content, row, pos.line_idx, is_current_match);
       }
 
@@ -239,8 +249,10 @@ pub const Viewer = struct {
     is_current: bool,
     indent: u16,
   ) void {
-    var col: u16 = self.num_w + 1 + indent;
-    const max_col = self.num_w + 1 + self.contentWidth();
+    const gw = self.gutterWidth();
+    const gutter_end = gw + @as(u16, if (gw > 0) 1 else 0);
+    var col: u16 = gutter_end + indent;
+    const max_col = gutter_end + self.contentWidth();
 
     const query = self.search.query.items;
     const raw = line.raw;
@@ -406,9 +418,7 @@ pub const Viewer = struct {
         .fg = .{ .rgb = .{ 255, 200, 60 } },
       });
       left = writeStr(bar, left + 1, 0, "n/N/enter next/prev  esc clear", bg);
-    } else {
-      left = writeStr(bar, left, 0, "q quit  / search  g/G top/end", bg);
-    }
+    } else left = writeStr(bar, left, 0, "q quit  / search  g/G top/end  l lines", bg);
 
     if (self.totalVisualRows() <= self.contentHeight()) {
       self.pos_slice = "All ";
@@ -484,29 +494,31 @@ pub const Viewer = struct {
     page_down,
     half_page_down,
     half_page_up,
+    toggle_lines,
   };
 
   const Binding = struct { u21, Key.Modifiers, Action };
 
   const key_bindings = [_]Binding{
-    .{ 'q',          .{},             .quit },
-    .{ 'c',          .{ .ctrl = true }, .quit },
-    .{ '/',          .{},             .start_search },
-    .{ 'n',          .{},             .next_match },
-    .{ Key.enter,    .{},             .next_match },
-    .{ 'N',          .{ .shift = true }, .prev_match },
-    .{ 'g',          .{},             .scroll_top },
-    .{ 'G',          .{ .shift = true }, .scroll_bottom },
-    .{ Key.up,       .{},             .scroll_up },
-    .{ 'k',          .{},             .scroll_up },
-    .{ Key.down,     .{},             .scroll_down },
-    .{ 'j',          .{},             .scroll_down },
-    .{ Key.page_up,  .{},             .page_up },
-    .{ ' ',          .{ .shift = true }, .page_up },
-    .{ Key.page_down, .{},            .page_down },
-    .{ ' ',          .{},             .page_down },
-    .{ 'd',          .{ .ctrl = true }, .half_page_down },
-    .{ 'u',          .{ .ctrl = true }, .half_page_up },
+    .{ 'q',           .{},                .quit },
+    .{ 'c',           .{ .ctrl = true },  .quit },
+    .{ '/',           .{},                .start_search },
+    .{ 'n',           .{},                .next_match },
+    .{ Key.enter,     .{},                .next_match },
+    .{ 'N',           .{ .shift = true }, .prev_match },
+    .{ 'g',           .{},                .scroll_top },
+    .{ 'G',           .{ .shift = true }, .scroll_bottom },
+    .{ Key.up,        .{},                .scroll_up },
+    .{ 'k',           .{},                .scroll_up },
+    .{ Key.down,      .{},                .scroll_down },
+    .{ 'j',           .{},                .scroll_down },
+    .{ Key.page_up,   .{},                .page_up },
+    .{ ' ',           .{ .shift = true }, .page_up },
+    .{ Key.page_down, .{},               .page_down },
+    .{ ' ',           .{},                .page_down },
+    .{ 'd',           .{ .ctrl = true },  .half_page_down },
+    .{ 'u',           .{ .ctrl = true },  .half_page_up },
+    .{ 'l',           .{},                .toggle_lines },
   };
 
   pub fn handleKeyPress(self: *Viewer, key: Key) Action {
@@ -540,6 +552,12 @@ pub const Viewer = struct {
       .page_down => self.scroll = @min(self.scroll + self.contentHeight(), self.maxScroll()),
       .half_page_down => self.scroll = @min(self.scroll + self.contentHeight() / 2, self.maxScroll()),
       .half_page_up => self.scroll -|= self.contentHeight() / 2,
+      .toggle_lines => {
+        self.show_lines = !self.show_lines;
+        self.wrap.width = 0;
+        const m: mem.Memory = .{ .show_lines = self.show_lines };
+        m.save(self.alloc);
+      },
       .quit, .none => {},
     }
   }
