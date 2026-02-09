@@ -147,11 +147,11 @@ pub const Viewer = struct {
 
   pub fn nextHeading(self: *Viewer) void {
     if (self.headings.len == 0) return;
-    const current_line = self.wrap.visualToLogical(self.scroll).line_idx;
     for (self.headings) |h| {
-      if (h.line_idx > current_line) {
-        const vrow = self.wrap.logicalToVisual(h.line_idx);
-        self.scroll = if (vrow > 2) vrow - 2 else 0;
+      const vrow = self.wrap.logicalToVisual(h.line_idx);
+      const target = if (vrow > 2) vrow - 2 else 0;
+      if (target > self.scroll) {
+        self.scroll = target;
         self.clampScroll();
         return;
       }
@@ -160,13 +160,13 @@ pub const Viewer = struct {
 
   pub fn prevHeading(self: *Viewer) void {
     if (self.headings.len == 0) return;
-    const current_line = self.wrap.visualToLogical(self.scroll).line_idx;
     var i: usize = self.headings.len;
     while (i > 0) {
       i -= 1;
-      if (self.headings[i].line_idx < current_line) {
-        const vrow = self.wrap.logicalToVisual(self.headings[i].line_idx);
-        self.scroll = if (vrow > 2) vrow - 2 else 0;
+      const vrow = self.wrap.logicalToVisual(self.headings[i].line_idx);
+      const target = if (vrow > 2) vrow - 2 else 0;
+      if (target < self.scroll) {
+        self.scroll = target;
         self.clampScroll();
         return;
       }
