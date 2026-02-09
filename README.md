@@ -7,6 +7,7 @@ Parses markdown and renders it with beautiful ANSI colors, syntax highlighting, 
 ## Usage
 
 ```
+ink                    # open file selector
 ink file.md            # render to terminal
 ink --view file.md     # open in TUI viewer
 ink --watch file.md    # re-render on file changes

@@ -1,28 +1,31 @@
 const std = @import("std");
 
 pub fn getGitCommit(b: *std.Build) ?[]const u8 {
-  var exit_code: u8 = undefined;
-  const result = b.runAllowFail(
-    &.{"git", "rev-parse", "HEAD"}, &exit_code, .Ignore
-  ) catch return null;
-  if (exit_code != 0) return null;
-  return std.mem.trim(u8, result, &std.ascii.whitespace);
+  const result = std.process.Child.run(.{
+    .allocator = b.allocator,
+    .argv = &.{ "git", "rev-parse", "HEAD" },
+    .cwd = b.build_root.path orelse ".",
+  }) catch return null;
+  if (result.term.Exited != 0) return null;
+  return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 }
 
 pub fn getGitBranch(b: *std.Build) ?[]const u8 {
-  var exit_code: u8 = undefined;
-  const result = b.runAllowFail(
-    &.{"git", "rev-parse", "--abbrev-ref", "HEAD"}, &exit_code, .Ignore
-  ) catch return null;
-  if (exit_code != 0) return null;
-  return std.mem.trim(u8, result, &std.ascii.whitespace);
+  const result = std.process.Child.run(.{
+    .allocator = b.allocator,
+    .argv = &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" },
+    .cwd = b.build_root.path orelse ".",
+  }) catch return null;
+  if (result.term.Exited != 0) return null;
+  return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 }
 
 pub fn isGitDirty(b: *std.Build) bool {
-  var exit_code: u8 = undefined;
-  const result = b.runAllowFail(
-    &.{"git", "status", "--porcelain"}, &exit_code, .Ignore
-  ) catch return false;
-  if (exit_code != 0) return false;
-  return result.len > 0;
+  const result = std.process.Child.run(.{
+    .allocator = b.allocator,
+    .argv = &.{ "git", "status", "--porcelain" },
+    .cwd = b.build_root.path orelse ".",
+  }) catch return false;
+  if (result.term.Exited != 0) return false;
+  return result.stdout.len > 0;
 }
