@@ -8,10 +8,6 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
-    zig-overlay = {
-      url = "github:mitchellh/zig-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
@@ -21,20 +17,16 @@
 
       perSystem =
         {
-          inputs',
           lib,
           pkgs,
           ...
         }:
         let
+          zig = pkgs.zig_0_15;
           version = lib.pipe ./ink.version [
             builtins.readFile
             lib.trim
           ];
-          zig = inputs'.zig-overlay.packages."0.15.2";
-          zigHook = pkgs.zig.hook.overrideAttrs {
-            propagatedBuildInputs = [ zig ];
-          };
         in
         {
           packages.default = pkgs.stdenv.mkDerivation (finalAttrs: {
@@ -45,7 +37,7 @@
             deps = pkgs.callPackage ./build.zig.zon.nix { };
 
             nativeBuildInputs = [
-              zigHook
+              zig.hook
               pkgs.writableTmpDirAsHomeHook
             ];
 
