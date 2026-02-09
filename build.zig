@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
     .root_module = ink,
   });
   
-  const version = b.option(Bytes, "version", "Version string") orelse "0.0.1";
+  const version = b.option(Bytes, "version", "Version string") orelse "0.0.2";
   const timestamp = std.time.timestamp();
   
   const git_commit = utils.getGitCommit(b) orelse "unknown";
