@@ -4,6 +4,7 @@ pub const Memory = struct {
   show_lines: bool = false,
   show_urls: bool = false,
   margin: u16 = 2,
+  line_wrap_percent: u8 = 90,
 
   pub fn load(alloc: std.mem.Allocator) Memory {
     const path = configPath(alloc) orelse return .{};

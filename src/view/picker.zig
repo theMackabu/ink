@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const search = @import("search.zig");
 
 pub const FileEntry = struct {
   path: []const u8,
@@ -13,6 +14,7 @@ const FileRow = struct {
   time_str: []const u8,
   size_str: []const u8,
   selected: bool = false,
+  hovered: bool = false,
 
   pub fn widget(self: *const FileRow) vxfw.Widget {
     return .{
@@ -28,6 +30,7 @@ const FileRow = struct {
 
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 1 });
     const bg: vaxis.Style = if (self.selected) .{ .bg = .{ .rgb = .{ 50, 50, 70 } } }
+    else if (self.hovered) .{ .bg = .{ .rgb = .{ 38, 38, 52 } } }
     else .{};
 
     @memset(surface.buffer, .{ .style = bg });
@@ -45,6 +48,8 @@ const FileRow = struct {
     const name_style: vaxis.Style = .{
       .fg = if (self.selected)
         .{ .rgb = .{ 230, 230, 250 } }
+      else if (self.hovered)
+        .{ .rgb = .{ 190, 190, 210 } }
       else
         .{ .rgb = .{ 170, 170, 190 } },
       .bg = bg.bg,
@@ -75,12 +80,26 @@ const FileRow = struct {
   }
 };
 
+pub const Action = enum { view, edit };
+
+pub const PickerResult = struct {
+  path: []const u8,
+  action: Action,
+};
+
 const Picker = struct {
   alloc: std.mem.Allocator,
   files: []FileEntry,
   rows: []FileRow,
+  filtered_rows: []FileRow,
+  filter_buf: []FileRow,
   list_view: vxfw.ListView,
+  search_state: search.SearchState,
+  string_allocs: std.ArrayList([]const u8),
   selected: ?[]const u8 = null,
+  action: Action = .view,
+  show_help: bool = false,
+  hovered_idx: ?usize = null,
 
   pub fn widget(self: *Picker) vxfw.Widget {
     return .{
@@ -95,16 +114,76 @@ const Picker = struct {
     switch (event) {
       .init => return ctx.requestFocus(self.list_view.widget()),
       .key_press => |key| {
-        if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+        if (key.matches('c', .{ .ctrl = true })) {
+          ctx.quit = true;
+          return;
+        }
+
+        if (self.search_state.active) {
+          if (key.matches(vaxis.Key.escape, .{})) {
+            self.search_state.active = false;
+            self.search_state.clear();
+            self.applyFilter();
+            try ctx.requestFocus(self.list_view.widget());
+            return ctx.consumeAndRedraw();
+          }
+          if (key.matches(vaxis.Key.enter, .{})) {
+            self.search_state.active = false;
+            try ctx.requestFocus(self.list_view.widget());
+            return ctx.consumeAndRedraw();
+          }
+          if (key.matches('j', .{ .ctrl = true }) or key.matches(vaxis.Key.down, .{})) {
+            return self.list_view.handleEvent(ctx, event);
+          }
+          if (key.matches('k', .{ .ctrl = true }) or key.matches(vaxis.Key.up, .{})) {
+            return self.list_view.handleEvent(ctx, event);
+          }
+          if (key.matches(vaxis.Key.backspace, .{})) {
+            if (self.search_state.query.items.len > 0) {
+              _ = self.search_state.query.pop();
+              self.applyFilter();
+            }
+            return ctx.consumeAndRedraw();
+          }
+          if (key.text) |text| {
+            self.search_state.query.appendSlice(self.alloc, text) catch {};
+            self.applyFilter();
+            return ctx.consumeAndRedraw();
+          }
+          return;
+        }
+
+        if (key.matches('q', .{})) {
           ctx.quit = true;
           return;
         }
         if (key.matches(vaxis.Key.enter, .{})) {
-          if (self.list_view.cursor < self.files.len) {
-            self.selected = self.files[self.list_view.cursor].path;
+          if (self.list_view.cursor < self.filtered_rows.len) {
+            self.selected = self.filtered_rows[self.list_view.cursor].path;
           }
           ctx.quit = true;
           return;
+        }
+        if (key.matches('e', .{})) {
+          if (self.list_view.cursor < self.filtered_rows.len) {
+            self.selected = self.filtered_rows[self.list_view.cursor].path;
+            self.action = .edit;
+          }
+          ctx.quit = true;
+          return;
+        }
+        if (key.matches('?', .{ .shift = true })) {
+          self.show_help = !self.show_help;
+          return ctx.consumeAndRedraw();
+        }
+        if (key.matches('r', .{})) {
+          self.refresh() catch {};
+          return ctx.consumeAndRedraw();
+        }
+        if (key.matches('/', .{})) {
+          self.search_state.active = true;
+          try ctx.requestFocus(self.widget());
+          return ctx.consumeAndRedraw();
         }
         if (key.matches('g', .{})) {
           self.list_view.cursor = 0;
@@ -112,8 +191,8 @@ const Picker = struct {
           return ctx.consumeAndRedraw();
         }
         if (key.matches('G', .{ .shift = true })) {
-          if (self.files.len > 0) {
-            self.list_view.cursor = @intCast(self.files.len - 1);
+          if (self.filtered_rows.len > 0) {
+            self.list_view.cursor = @intCast(self.filtered_rows.len - 1);
             self.list_view.ensureScroll();
           }
           return ctx.consumeAndRedraw();
@@ -121,23 +200,109 @@ const Picker = struct {
         return self.list_view.handleEvent(ctx, event);
       },
       .focus_in => return ctx.requestFocus(self.list_view.widget()),
-      .mouse => |mouse| return self.list_view.handleEvent(ctx, .{ .mouse = mouse }),
+      .mouse => |mouse| {
+        if (mouse.button == .wheel_up or mouse.button == .wheel_down) {
+          return self.list_view.handleEvent(ctx, .{ .mouse = mouse });
+        }
+        const row_idx = self.mouseToIndex(mouse.row);
+        if (mouse.type == .motion or mouse.type == .drag) {
+          if (row_idx != self.hovered_idx) {
+            self.hovered_idx = row_idx;
+            return ctx.consumeAndRedraw();
+          }
+        }
+        if (mouse.type == .press and mouse.button == .left) {
+          if (row_idx) |idx| {
+            self.list_view.cursor = @intCast(idx);
+            self.selected = self.filtered_rows[idx].path;
+            ctx.quit = true;
+          }
+        }
+      },
+      .mouse_leave => {
+        if (self.hovered_idx != null) {
+          self.hovered_idx = null;
+          return ctx.consumeAndRedraw();
+        }
+      },
       else => {},
     }
+  }
+
+  fn mouseToIndex(self: *Picker, mouse_row: i16) ?usize {
+    if (mouse_row < 2) return null;
+    const row: usize = @intCast(mouse_row - 2);
+    const actual = self.list_view.scroll.top + row;
+    if (actual >= self.filtered_rows.len) return null;
+    return actual;
+  }
+
+  fn applyFilter(self: *Picker) void {
+    const needle = self.search_state.query.items;
+    if (needle.len == 0) {
+      @memcpy(self.filter_buf[0..self.rows.len], self.rows);
+      self.filtered_rows = self.filter_buf[0..self.rows.len];
+    } else {
+      var count: usize = 0;
+      for (self.rows) |row| {
+        if (search.containsIgnoreCase(row.path, needle)) {
+          self.filter_buf[count] = row;
+          count += 1;
+        }
+      }
+      self.filtered_rows = self.filter_buf[0..count];
+    }
+    self.list_view.item_count = @intCast(self.filtered_rows.len);
+    self.list_view.cursor = 0;
+  }
+
+  fn refresh(self: *Picker) !void {
+    for (self.string_allocs.items) |s| self.alloc.free(s);
+    self.string_allocs.clearRetainingCapacity();
+    for (self.files) |f| self.alloc.free(f.path);
+    self.alloc.free(self.files);
+    self.alloc.free(self.rows);
+    self.alloc.free(self.filter_buf);
+
+    const files = try collectMarkdownFiles(self.alloc);
+    const rows = try self.alloc.alloc(FileRow, files.len);
+    const filtered = try self.alloc.alloc(FileRow, files.len);
+
+    for (files, 0..) |f, i| {
+      const time_str = try formatTime(self.alloc, f.mtime);
+      try self.string_allocs.append(self.alloc, time_str);
+      const size_str = try formatSize(self.alloc, f.size);
+      try self.string_allocs.append(self.alloc, size_str);
+      rows[i] = .{
+        .path = f.path,
+        .time_str = time_str,
+        .size_str = size_str,
+      };
+    }
+
+    self.files = files;
+    self.rows = rows;
+    self.filter_buf = filtered;
+    self.search_state.clear();
+    self.applyFilter();
   }
 
   fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Picker = @ptrCast(@alignCast(ptr));
     const max = ctx.max.size();
 
-    for (self.rows, 0..) |*row, i| {
+    for (self.filtered_rows, 0..) |*row, i| {
       row.selected = (i == self.list_view.cursor);
+      row.hovered = if (self.hovered_idx) |h| (i == h and !row.selected) else false;
     }
 
     const header = try self.drawHeader(ctx, max.width);
     const footer = try self.drawFooter(ctx, max.width);
+    const footer_h: u16 = if (!self.show_help) 1
+      else if (self.search_state.active) 3
+      else 4;
 
-    const list_height = max.height -| 3;
+    const list_height = max.height -| (2 + footer_h + 1);
     const list_surface: vxfw.SubSurface = .{
       .origin = .{ .row = 2, .col = 0 },
       .surface = try self.list_view.draw(ctx.withConstraints(
@@ -153,7 +318,7 @@ const Picker = struct {
     };
     children[1] = list_surface;
     children[2] = .{
-      .origin = .{ .row = max.height -| 1, .col = 0 },
+      .origin = .{ .row = max.height -| (footer_h + 1), .col = 2 },
       .surface = footer,
     };
 
@@ -168,19 +333,46 @@ const Picker = struct {
   fn drawHeader(self: *Picker, ctx: vxfw.DrawContext, w: u16) std.mem.Allocator.Error!vxfw.Surface {
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 2 });
 
-    const title_style: vaxis.Style = .{
-      .fg = .{ .rgb = .{ 180, 180, 200 } },
-      .bold = true,
-    };
-    _ = writeStr(surface, 1, 0, "ink", title_style);
+    if (self.search_state.active) {
+      const prompt_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 130, 90, 220 } } };
+      const text_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 200, 200, 220 } } };
+      var col = writeStr(surface, 1, 0, "/", prompt_style);
+      col = writeStr(surface, col, 0, self.search_state.query.items, text_style);
+      surface.writeCell(col, 0, .{
+        .char = .{ .grapheme = "▏", .width = 1 },
+        .style = .{ .fg = .{ .rgb = .{ 130, 90, 220 } } },
+      });
 
-    const count_str = try std.fmt.allocPrint(ctx.arena, " {d} markdown file{s}", .{
-      self.files.len,
-      if (self.files.len != 1) "s" else "",
-    });
-    _ = writeStr(surface, 5, 0, count_str, .{
-      .fg = .{ .rgb = .{ 80, 80, 100 } },
-    });
+      const count_str = try std.fmt.allocPrint(ctx.arena, "{d}/{d}", .{
+        self.filtered_rows.len,
+        self.rows.len,
+      });
+      const count_start = w -| @as(u16, @intCast(@min(count_str.len + 1, w)));
+      _ = writeStr(surface, count_start, 0, count_str, .{
+        .fg = .{ .rgb = .{ 80, 80, 100 } },
+      });
+    } else {
+      const title_style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 180, 180, 200 } },
+        .bold = true,
+      };
+      _ = writeStr(surface, 1, 0, "ink", title_style);
+
+      const count_str = if (self.search_state.query.items.len > 0)
+        try std.fmt.allocPrint(ctx.arena, " {d}/{d} document{s}", .{
+          self.filtered_rows.len,
+          self.rows.len,
+          if (self.rows.len != 1) "s" else "",
+        })
+      else
+        try std.fmt.allocPrint(ctx.arena, " {d} document{s}", .{
+          self.rows.len,
+          if (self.rows.len != 1) "s" else "",
+        });
+      _ = writeStr(surface, 5, 0, count_str, .{
+        .fg = .{ .rgb = .{ 80, 80, 100 } },
+      });
+    }
 
     const sep_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 50, 50, 65 } } };
     var col: u16 = 1;
@@ -195,30 +387,90 @@ const Picker = struct {
   }
 
   fn drawFooter(self: *Picker, ctx: vxfw.DrawContext, w: u16) std.mem.Allocator.Error!vxfw.Surface {
+    if (self.show_help) return self.drawHelp(ctx, w);
+
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 1 });
+    const key_s: vaxis.Style = .{ .fg = .{ .rgb = .{ 110, 110, 135 } } };
+    const desc_s: vaxis.Style = .{ .fg = .{ .rgb = .{ 75, 75, 95 } } };
+    const dot_s: vaxis.Style = .{ .fg = .{ .rgb = .{ 55, 55, 70 } } };
 
-    const bg: vaxis.Style = .{
-      .bg = .{ .rgb = .{ 40, 40, 50 } },
-      .fg = .{ .rgb = .{ 130, 130, 150 } },
-    };
-    @memset(surface.buffer, .{ .style = bg });
+    const binds: []const [3][]const u8 = if (self.search_state.active)
+      &.{
+        .{ "enter", "confirm", " • " },
+        .{ "esc", "clear", " • " },
+        .{ "e", "edit", " • " },
+        .{ "q", "quit", "" },
+      }
+    else
+      &.{
+        .{ "/", "find", " • " },
+        .{ "r", "refresh", " • " },
+        .{ "e", "edit", " • " },
+        .{ "q", "quit", " • " },
+        .{ "?", "more", "" },
+      };
 
-    _ = writeStr(surface, 1, 0, "enter open  j/k up/down  g/G top/end  q quit", bg);
+    var col: u16 = 1;
+    for (binds) |b| {
+      col = writeStr(surface, col, 0, b[0], key_s);
+      col = writeStr(surface, col + 1, 0, b[1], desc_s);
+      if (b[2].len > 0) col = writeStr(surface, col, 0, b[2], dot_s);
+    }
+    return surface;
+  }
 
-    const pos_str = try std.fmt.allocPrint(ctx.arena, "{d}/{d} ", .{
-      if (self.files.len > 0) self.list_view.cursor + 1 else @as(u32, 0),
-      self.files.len,
-    });
-    const pos_start = w -| @as(u16, @intCast(@min(pos_str.len, w)));
-    _ = writeStr(surface, pos_start, 0, pos_str, bg);
+  fn drawHelp(self: *Picker, ctx: vxfw.DrawContext, w: u16) std.mem.Allocator.Error!vxfw.Surface {
+    const ks: vaxis.Style = .{ .fg = .{ .rgb = .{ 110, 110, 135 } } };
+    const ds: vaxis.Style = .{ .fg = .{ .rgb = .{ 75, 75, 95 } } };
+
+    if (self.search_state.active) {
+      const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 3 });
+      var c: u16 = undefined;
+
+      c = writeStr(surface, 1, 0, "enter", ks);
+      _ = writeStr(surface, c + 1, 0, "confirm", ds);
+
+      c = writeStr(surface, 1, 1, "esc", ks);
+      _ = writeStr(surface, c + 1, 1, "cancel", ds);
+
+      c = writeStr(surface, 1, 2, "ctrl+j/ctrl+k ↑/↓", ks);
+      _ = writeStr(surface, c + 1, 2, "choose", ds);
+
+      return surface;
+    }
+
+    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 4 });
+    const col2: u16 = 22;
+    var c: u16 = undefined;
+
+    c = writeStr(surface, 1, 0, "enter", ks);
+    _ = writeStr(surface, c + 1, 0, "open", ds);
+    c = writeStr(surface, col2, 0, "/", ks);
+    _ = writeStr(surface, c + 1, 0, "find", ds);
+
+    c = writeStr(surface, 1, 1, "j/k ↑/↓", ks);
+    _ = writeStr(surface, c + 1, 1, "choose", ds);
+    c = writeStr(surface, col2, 1, "r", ks);
+    _ = writeStr(surface, c + 1, 1, "refresh", ds);
+
+    c = writeStr(surface, 1, 2, "g/G", ks);
+    _ = writeStr(surface, c + 1, 2, "top/bottom", ds);
+    c = writeStr(surface, col2, 2, "e", ks);
+    _ = writeStr(surface, c + 1, 2, "edit", ds);
+
+    _ = writeStr(surface, col2, 3, "q", ks);
+    _ = writeStr(surface, col2 + 2, 3, "quit", ds);
+
+    _ = writeStr(surface, col2 + 14, 3, "?", ks);
+    _ = writeStr(surface, col2 + 16, 3, "close help", ds);
 
     return surface;
   }
 
   fn widgetBuilder(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     const self: *const Picker = @ptrCast(@alignCast(ptr));
-    if (idx >= self.rows.len) return null;
-    return self.rows[idx].widget();
+    if (idx >= self.filtered_rows.len) return null;
+    return self.filtered_rows[idx].widget();
   }
 };
 
@@ -319,22 +571,12 @@ fn formatSize(alloc: std.mem.Allocator, size: u64) ![]const u8 {
   return try std.fmt.allocPrint(alloc, "{d:.1} MB", .{mb});
 }
 
-pub fn run(alloc: std.mem.Allocator) !?[]const u8 {
+pub fn run(alloc: std.mem.Allocator) !?PickerResult {
   const files = try collectMarkdownFiles(alloc);
-  defer {
-    for (files) |f| alloc.free(f.path);
-    alloc.free(files);
-  }
-
   const rows = try alloc.alloc(FileRow, files.len);
-  defer alloc.free(rows);
+  const filtered = try alloc.alloc(FileRow, files.len);
 
   var string_allocs = std.ArrayList([]const u8).empty;
-  defer {
-    for (string_allocs.items) |s| alloc.free(s);
-    string_allocs.deinit(alloc);
-  }
-
   for (files, 0..) |f, i| {
     const time_str = try formatTime(alloc, f.mtime);
     try string_allocs.append(alloc, time_str);
@@ -348,12 +590,25 @@ pub fn run(alloc: std.mem.Allocator) !?[]const u8 {
   }
 
   const picker = try alloc.create(Picker);
-  defer alloc.destroy(picker);
+  defer {
+    for (picker.string_allocs.items) |s| alloc.free(s);
+    picker.string_allocs.deinit(alloc);
+    for (picker.files) |f| alloc.free(f.path);
+    alloc.free(picker.files);
+    alloc.free(picker.rows);
+    alloc.free(picker.filter_buf);
+    picker.search_state.deinit();
+    alloc.destroy(picker);
+  }
 
   picker.* = .{
     .alloc = alloc,
     .files = files,
     .rows = rows,
+    .filtered_rows = filtered[0..rows.len],
+    .filter_buf = filtered,
+    .search_state = search.SearchState.init(alloc),
+    .string_allocs = string_allocs,
     .list_view = .{
       .draw_cursor = false,
       .wheel_scroll = 3,
@@ -367,13 +622,18 @@ pub fn run(alloc: std.mem.Allocator) !?[]const u8 {
     },
   };
 
+  @memcpy(picker.filtered_rows, rows);
+
   var app = try vxfw.App.init(alloc);
   defer app.deinit();
 
   try app.run(picker.widget(), .{});
 
   if (picker.selected) |path| {
-    return try alloc.dupe(u8, path);
+    return .{
+      .path = try alloc.dupe(u8, path),
+      .action = picker.action,
+    };
   }
   return null;
 }

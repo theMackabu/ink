@@ -50,6 +50,7 @@ pub const Viewer = struct {
   num_w: u16,
   show_lines: bool = false,
   show_urls: bool = false,
+  line_wrap_percent: u8 = 90,
   term_h: u16 = 24,
   term_w: u16 = 80,
   dragging: bool = false,
@@ -74,7 +75,8 @@ pub const Viewer = struct {
     const gw = self.gutterWidth();
     const taken = gw + @as(u16, if (gw > 0) 1 else 0) + 1;
     const full = @max(1, self.term_w -| taken);
-    return @max(1, @as(u16, @intFromFloat(@as(f64, @floatFromInt(full)) * 0.9)));
+    const pct: f64 = @as(f64, @floatFromInt(@min(self.line_wrap_percent, 100))) / 100.0;
+    return @max(1, @as(u16, @intFromFloat(@as(f64, @floatFromInt(full)) * pct)));
   }
 
   pub fn totalVisualRows(self: *const Viewer) usize {

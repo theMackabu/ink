@@ -84,6 +84,7 @@ pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching:
     .num_w = @intCast(viewer.digitCount(parsed.lines.len) + 1),
     .show_lines = mem.show_lines,
     .show_urls = mem.show_urls,
+    .line_wrap_percent = mem.line_wrap_percent,
     .search = SearchState.init(alloc),
     .wrap = WrapLayout.init(alloc),
   };

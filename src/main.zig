@@ -51,9 +51,12 @@ pub fn main() !void {
       std.process.exit(1);
     };
     
-    if (picked) |p| {
-      defer allocator.free(p);
-      try launchTui(allocator, p, watching);
+    if (picked) |result| {
+      defer allocator.free(result.path);
+      switch (result.action) {
+        .view => try launchTui(allocator, result.path, watching),
+        .edit => launchEditor(result.path, ctx),
+      }
     }
     return;
   };
@@ -107,6 +110,19 @@ fn launchTui(allocator: std.mem.Allocator, path: []const u8, watching: bool) !vo
   try aw.writer.flush();
   const rendered = aw.writer.buffer[0..aw.writer.end];
   try ink.tui.run(allocator, rendered, path, watching);
+}
+
+fn launchEditor(path: []const u8, ctx: cli.Ctx) void {
+  const editor = std.posix.getenv("EDITOR") orelse "vi";
+  var child = std.process.Child.init(&.{ editor, path }, ctx.allocator);
+  child.stdin_behavior = .Inherit;
+  child.stdout_behavior = .Inherit;
+  child.stderr_behavior = .Inherit;
+
+  _ = child.spawnAndWait() catch |err| {
+    ctx.printf("error: failed to launch editor: {s}\n", .{@errorName(err)});
+    std.process.exit(1);
+  };
 }
 
 fn readFile(arena: *ink.Arena, path: []const u8, ctx: cli.Ctx) ?[]const u8 {
