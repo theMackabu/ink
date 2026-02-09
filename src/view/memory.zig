@@ -2,20 +2,28 @@ const std = @import("std");
 
 pub const Memory = struct {
   show_lines: bool = false,
+  show_urls: bool = false,
+  margin: u16 = 2,
 
   pub fn load(alloc: std.mem.Allocator) Memory {
     const path = configPath(alloc) orelse return .{};
     defer alloc.free(path);
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch return .{};
+    const file = std.fs.openFileAbsolute(path, .{}) catch {
+      const m: Memory = .{};
+      m.save(alloc);
+      return m;
+    };
     defer file.close();
 
     const content = file.readToEndAlloc(alloc, 4096) catch return .{};
     defer alloc.free(content);
 
-    return std.json.parseFromSliceLeaky(Memory, alloc, content, .{
+    const m = std.json.parseFromSliceLeaky(Memory, alloc, content, .{
       .ignore_unknown_fields = true,
-    }) catch .{};
+    }) catch Memory{};
+    m.save(alloc);
+    return m;
   }
 
   pub fn save(self: Memory, alloc: std.mem.Allocator) void {

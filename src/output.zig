@@ -37,6 +37,7 @@ const ansi = struct {
   pub const BG_GRAY = "\x1b[48;5;236m";
   pub const PURPLE = "\x1b[35m";
   pub const BRIGHT_RED = "\x1b[91m";
+  pub const PINK = "\x1b[38;5;212m";
 };
 
 const CalloutStyle = struct {
@@ -140,29 +141,47 @@ const Ctx = struct {
   fn renderLink(self: Ctx, lnk: Node.Link, style: Style) anyerror!void {
     const clickable = lnk.url.len > 0 and !isFragment(lnk.url);
     const is_frag = isFragment(lnk.url);
-    if (clickable) {
+    if (clickable and !self.tui) {
       try self.w.writeAll("\x1b]8;;");
       try self.w.writeAll(lnk.url);
       try self.w.writeAll("\x1b\\");
     }
-    if (self.tui and is_frag) {
+    if (self.tui and (is_frag or clickable)) {
       try self.w.writeAll("\x1b_L;");
-      try self.w.writeAll(lnk.url[1..]);
+      if (is_frag) try self.w.writeAll(lnk.url[1..])
+      else try self.w.writeAll(lnk.url);
       try self.w.writeAll("\x1b\\");
     }
     try self.w.writeAll(ansi.UNDERLINE ++ ansi.CYAN);
     try self.w.writeAll(lnk.label);
     try self.w.writeAll(ansi.RESET);
-    if (self.tui and is_frag) {
+    if (self.tui and (is_frag or clickable)) {
       try self.w.writeAll("\x1b_E\x1b\\");
     }
-    if (clickable) {
+    if (clickable and !self.tui) {
       try self.w.writeAll("\x1b]8;;\x1b\\");
-      if (self.show_urls) {
-        try self.w.writeAll(" \x1b[38;5;239m(");
-        try self.w.writeAll(lnk.url);
-        try self.w.writeAll(")" ++ ansi.RESET);
-      }
+    }
+    if (clickable and self.show_urls) {
+      try self.w.writeAll(" \x1b[38;5;239m(");
+      try self.w.writeAll(lnk.url);
+      try self.w.writeAll(")" ++ ansi.RESET);
+    }
+    try self.restoreStyle(style);
+  }
+
+  fn renderImage(self: Ctx, img: Node.Link, style: Style) anyerror!void {
+    try self.w.writeAll(ansi.GRAY);
+    try self.w.writeAll("Image: ");
+    try self.w.writeAll(ansi.ITALIC);
+    try self.w.writeAll(img.label);
+    try self.w.writeAll(ansi.RESET);
+    if (img.url.len > 0) {
+      try self.w.writeAll(ansi.GRAY);
+      try self.w.writeAll(" → ");
+      try self.w.writeAll(ansi.RESET);
+      try self.w.writeAll(ansi.UNDERLINE ++ ansi.PINK);
+      try self.w.writeAll(img.url);
+      try self.w.writeAll(ansi.RESET);
     }
     try self.restoreStyle(style);
   }
@@ -459,6 +478,7 @@ const Ctx = struct {
       .italic => try self.renderItalic(nd, depth, style),
       .code => |txt| try self.renderCode(txt, style),
       .link => |lnk| try self.renderLink(lnk, style),
+      .image => |img| try self.renderImage(img, style),
       .heading => |level| try self.renderHeading(nd, level, depth),
       .paragraph => try self.renderParagraph(nd, depth, style.quoted),
       .list_item => |li| try self.renderListItem(nd, li, depth, style.quoted),

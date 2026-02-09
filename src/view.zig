@@ -12,6 +12,7 @@ pub const wrap = @import("view/wrap.zig");
 pub const viewer = @import("view/viewer.zig");
 pub const watch = @import("view/watch.zig");
 pub const memory = @import("view/memory.zig");
+pub const picker = @import("view/picker.zig");
 
 const Bytes = types.Bytes;
 const Event = types.Event;
@@ -20,7 +21,7 @@ const WrapLayout = wrap.WrapLayout;
 const Viewer = viewer.Viewer;
 const Memory = memory.Memory;
 
-fn reloadContent(alloc: std.mem.Allocator, path: Bytes) !struct { rendered: Bytes, arena: *node.Arena } {
+fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool) !struct { rendered: Bytes, arena: *node.Arena } {
   var arena = try alloc.create(node.Arena);
   arena.* = node.Arena.init(std.heap.page_allocator);
 
@@ -35,7 +36,7 @@ fn reloadContent(alloc: std.mem.Allocator, path: Bytes) !struct { rendered: Byte
   var aw: std.Io.Writer.Allocating = .init(alloc);
   try output.render(&aw.writer, root, .{
     .highlighter = &highlighter,
-    .show_urls = false,
+    .show_urls = show_urls,
     .tui = true,
   });
   try aw.writer.flush();
@@ -44,6 +45,30 @@ fn reloadContent(alloc: std.mem.Allocator, path: Bytes) !struct { rendered: Byte
   aw.deinit();
 
   return .{ .rendered = rendered, .arena = arena };
+}
+
+fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_rendered: *?[]const u8, prev_arena: *?*node.Arena) void {
+  const result = reloadContent(alloc, filename, v.show_urls) catch return;
+  const new_parsed = parse.parseAnsiLines(alloc, result.rendered) catch {
+    alloc.free(result.rendered);
+    result.arena.deinit();
+    alloc.destroy(result.arena);
+    return;
+  };
+
+  if (prev_rendered.*) |r| alloc.free(r);
+  if (prev_arena.*) |a| { a.deinit(); alloc.destroy(a); }
+  prev_rendered.* = result.rendered;
+  prev_arena.* = result.arena;
+
+  const old_scroll = v.scroll;
+  v.lines = new_parsed.lines;
+  v.headings = new_parsed.headings;
+  v.links = new_parsed.links;
+  v.num_w = @intCast(viewer.digitCount(new_parsed.lines.len) + 1);
+  v.wrap.width = 0;
+  v.scroll = old_scroll;
+  v.clampScroll();
 }
 
 pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching: bool) !void {
@@ -58,6 +83,7 @@ pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching:
     .filename = filename,
     .num_w = @intCast(viewer.digitCount(parsed.lines.len) + 1),
     .show_lines = mem.show_lines,
+    .show_urls = mem.show_urls,
     .search = SearchState.init(alloc),
     .wrap = WrapLayout.init(alloc),
   };
@@ -98,31 +124,16 @@ pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching:
     const event = loop.nextEvent();
     switch (event) {
       .file_changed => {
-        const result = reloadContent(alloc, filename) catch continue;
-        const new_parsed = parse.parseAnsiLines(alloc, result.rendered) catch {
-          alloc.free(result.rendered);
-          result.arena.deinit();
-          alloc.destroy(result.arena);
-          continue;
-        };
-
-        if (prev_rendered) |r| alloc.free(r);
-        if (prev_arena) |a| { a.deinit(); alloc.destroy(a); }
-        prev_rendered = result.rendered;
-        prev_arena = result.arena;
-
-        const old_scroll = v.scroll;
-        v.lines = new_parsed.lines;
-        v.headings = new_parsed.headings;
-        v.links = new_parsed.links;
-        v.num_w = @intCast(viewer.digitCount(new_parsed.lines.len) + 1);
-        v.wrap.width = 0;
-        v.scroll = old_scroll;
-        v.clampScroll();
+        refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena);
       },
       .key_press => |key| {
-        if (v.search.active) try v.handleSearchKey(alloc, key)
-        else if (v.handleKeyPress(key) == .quit) break;
+        if (v.search.active) {
+          try v.handleSearchKey(alloc, key);
+        } else {
+          const action = v.handleKeyPress(key);
+          if (action == .quit) break;
+          if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena);
+        }
       },
       .mouse => |mouse| v.handleMouse(mouse),
       .winsize => |ws| {

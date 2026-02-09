@@ -48,6 +48,7 @@ pub const Node = struct {
     bold, italic,
     code: Bytes,
     link: Link,
+    image: Link,
     list_item: List,
     task_item: Task,
     table: Table,
@@ -86,6 +87,13 @@ pub const Node = struct {
         try jw.write(lnk.label);
         try jw.objectField("url");
         try jw.write(lnk.url);
+      },
+      .image => |img| {
+        try jw.write("image");
+        try jw.objectField("alt");
+        try jw.write(img.label);
+        try jw.objectField("url");
+        try jw.write(img.url);
       },
       .list_item => |li| {
         try jw.write("list_item");

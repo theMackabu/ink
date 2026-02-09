@@ -115,7 +115,7 @@ fn parseApcPayload(
   }
 
   const tag = payload[0];
-  if (tag != payload[1] or payload[1] != ';') return;
+  if (payload[1] != ';') return;
 
   const data = payload[2..];
   switch (tag) {

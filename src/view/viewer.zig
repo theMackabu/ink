@@ -49,6 +49,7 @@ pub const Viewer = struct {
   filename: Bytes,
   num_w: u16,
   show_lines: bool = false,
+  show_urls: bool = false,
   term_h: u16 = 24,
   term_w: u16 = 80,
   dragging: bool = false,
@@ -418,7 +419,7 @@ pub const Viewer = struct {
         .fg = .{ .rgb = .{ 255, 200, 60 } },
       });
       left = writeStr(bar, left + 1, 0, "n/N/enter next/prev  esc clear", bg);
-    } else left = writeStr(bar, left, 0, "q quit  / search  g/G top/end  l lines", bg);
+    } else left = writeStr(bar, left, 0, "q quit  / search  g/G top/end  l lines  U urls", bg);
 
     if (self.totalVisualRows() <= self.contentHeight()) {
       self.pos_slice = "All ";
@@ -495,6 +496,7 @@ pub const Viewer = struct {
     half_page_down,
     half_page_up,
     toggle_lines,
+    toggle_urls,
   };
 
   const Binding = struct { u21, Key.Modifiers, Action };
@@ -519,6 +521,7 @@ pub const Viewer = struct {
     .{ 'd',           .{ .ctrl = true },  .half_page_down },
     .{ 'u',           .{ .ctrl = true },  .half_page_up },
     .{ 'l',           .{},                .toggle_lines },
+    .{ 'U',           .{ .shift = true }, .toggle_urls },
   };
 
   pub fn handleKeyPress(self: *Viewer, key: Key) Action {
@@ -555,11 +558,40 @@ pub const Viewer = struct {
       .toggle_lines => {
         self.show_lines = !self.show_lines;
         self.wrap.width = 0;
-        const m: mem.Memory = .{ .show_lines = self.show_lines };
-        m.save(self.alloc);
+        self.saveMemory();
+      },
+      .toggle_urls => {
+        self.show_urls = !self.show_urls;
+        self.saveMemory();
       },
       .quit, .none => {},
     }
+  }
+
+  fn saveMemory(self: *Viewer) void {
+    const m: mem.Memory = .{
+      .show_lines = self.show_lines,
+      .show_urls = self.show_urls,
+    };
+    m.save(self.alloc);
+  }
+
+  fn isExternalUrl(slug: Bytes) bool {
+    return std.mem.startsWith(u8, slug, "http://") 
+      or std.mem.startsWith(u8, slug, "https://");
+  }
+
+  fn openUrl(_: *Viewer, url: Bytes) void {
+    const cmd: []const []const u8 = switch (@import("builtin").os.tag) {
+      .macos => &.{ "open", url },
+      .windows => &.{ "cmd", "/c", "start", url },
+      else => &.{ "xdg-open", url },
+    };
+    var child = std.process.Child.init(cmd, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawn() catch return;
   }
 
   pub fn handleMouse(self: *Viewer, mouse: vaxis.Mouse) void {
@@ -568,7 +600,8 @@ pub const Viewer = struct {
       .press => {
         if (mouse.button == .left and mouse.col < sb_col - 1) {
           if (self.hitTestLink(mouse.col, mouse.row)) |slug| {
-            self.scrollToSlug(slug);
+            if (isExternalUrl(slug)) self.openUrl(slug)
+            else self.scrollToSlug(slug);
           }
         } else if (mouse.button == .left and mouse.col >= sb_col - 1) {
           self.dragging = true;

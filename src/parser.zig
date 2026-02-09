@@ -164,6 +164,22 @@ fn parseInlineCode(arena: *Arena, root: *?*Node, last: *?*Node, s: *Scanner) !us
   return s.pos;
 }
 
+fn parseImage(arena: *Arena, root: *?*Node, last: *?*Node, s: *Scanner) !usize {
+  s.advance(1);
+  const alt = s.scanUntil(']');
+  var url: Bytes = "";
+  if (!s.eof()) {
+    s.advance(1);
+    if (!s.eof() and s.cur() == '(') {
+      s.advance(1);
+      url = s.scanUntil(')');
+      if (!s.eof()) s.advance(1);
+    }
+  }
+  appendNode(root, last, try newNode(arena, .{ .image = .{ .label = alt, .url = url } }));
+  return s.pos;
+}
+
 fn parseLink(arena: *Arena, root: *?*Node, last: *?*Node, s: *Scanner) !usize {
   s.advance(1);
   const label = s.scanUntil(']');
@@ -199,6 +215,13 @@ pub fn parseInline(arena: *Arena, input: Bytes) error{OutOfMemory}!?*Node {
       '`' => {
         try flushText(arena, &root, &last, input, text_start, s.pos);
         text_start = try parseInlineCode(arena, &root, &last, &s);
+      },
+      '!' => {
+        if (s.pos + 1 < input.len and input[s.pos + 1] == '[') {
+          try flushText(arena, &root, &last, input, text_start, s.pos);
+          s.advance(1);
+          text_start = try parseImage(arena, &root, &last, &s);
+        } else s.advance(1);
       },
       '[' => {
         try flushText(arena, &root, &last, input, text_start, s.pos);

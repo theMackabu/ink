@@ -4,6 +4,8 @@ const clap = @import("clap");
 const config = @import("config");
 const cli = @import("cli.zig");
 
+const Memory = ink.tui.memory.Memory;
+
 pub fn main() !void {
   var gpa = std.heap.GeneralPurposeAllocator(.{}){};
   defer _ = gpa.deinit();
@@ -35,37 +37,28 @@ pub fn main() !void {
   if (res.args.help != 0) return clap.helpToFile(.stderr(), clap.Help, &params, .{});
   if (res.args.version != 0) return try ctx.version();
   
-  const path = res.positionals[0] orelse {
-    ctx.printf("usage: ink [--json] [--view] [--watch] <file.md>\n", .{});
-    std.process.exit(1);
-  };
-  
   const watching = res.args.watch != 0;
   const timing = res.args.timing != 0;
 
-  if (res.args.view != 0) {
-    var arena = ink.Arena.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const markdown = readFile(&arena, path, ctx) orelse return;
-    const root = try ink.parse(&arena, markdown);
-
-    var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
-    defer aw.deinit();
-
-    var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-    try ink.render(&aw.writer, root, .{ 
-      .highlighter = &highlighter,
-      .show_urls = false, 
-      .tui = true 
-    });
-
-    try aw.writer.flush();
-    const rendered = aw.writer.buffer[0..aw.writer.end];
-    try ink.tui.run(allocator, rendered, path, watching);
-
+  const path = res.positionals[0] orelse {
+    if (res.args.json != 0) {
+      ctx.printf("usage: ink --json <file.md>\n", .{});
+      std.process.exit(1);
+    }
+    
+    const picked = ink.tui.picker.run(allocator) catch |err| {
+      ctx.printf("error: file picker failed: {s}\n", .{@errorName(err)});
+      std.process.exit(1);
+    };
+    
+    if (picked) |p| {
+      defer allocator.free(p);
+      try launchTui(allocator, p, watching);
+    }
     return;
-  } 
+  };
+  
+  if (res.args.view != 0) return try launchTui(allocator, path, watching);
 
   if (res.args.json != 0) {
     var arena = ink.Arena.init(std.heap.page_allocator);
@@ -86,8 +79,34 @@ pub fn main() !void {
     return;
   }
 
-  if (watching) try watchNormal(allocator, path, ctx, timing)
-  else try renderNormal(allocator, path, ctx, timing);
+  const mem = Memory.load(allocator);
+  if (watching) try watchNormal(allocator, path, ctx, timing, mem)
+  else try renderNormal(allocator, path, ctx, timing, mem);
+}
+
+fn launchTui(allocator: std.mem.Allocator, path: []const u8, watching: bool) !void {
+  const mem = Memory.load(allocator);
+
+  var arena = ink.Arena.init(std.heap.page_allocator);
+  defer arena.deinit();
+
+  const ctx = cli.Ctx.init(allocator);
+  const markdown = readFile(&arena, path, ctx) orelse return;
+  const root = try ink.parse(&arena, markdown);
+
+  var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+  defer aw.deinit();
+
+  var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
+  try ink.render(&aw.writer, root, .{
+    .highlighter = &highlighter,
+    .show_urls = mem.show_urls,
+    .tui = true,
+  });
+
+  try aw.writer.flush();
+  const rendered = aw.writer.buffer[0..aw.writer.end];
+  try ink.tui.run(allocator, rendered, path, watching);
 }
 
 fn readFile(arena: *ink.Arena, path: []const u8, ctx: cli.Ctx) ?[]const u8 {
@@ -103,7 +122,7 @@ fn readFile(arena: *ink.Arena, path: []const u8, ctx: cli.Ctx) ?[]const u8 {
   };
 }
 
-fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bool) !void {
+fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bool, mem: Memory) !void {
   var arena = ink.Arena.init(std.heap.page_allocator);
   defer arena.deinit();
 
@@ -120,7 +139,7 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
   defer stdout.interface.flush() catch {};
 
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-  try ink.render(w, root, .{ .highlighter = &highlighter });
+  try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin });
   try w.writeAll("\n");
 
   if (timing) {
@@ -131,7 +150,7 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
   }
 }
 
-fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bool) !void {
+fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bool, mem: Memory) !void {
   const stdin_fd = std.posix.STDIN_FILENO;
   const orig_termios = std.posix.tcgetattr(stdin_fd) catch null;
   if (orig_termios) |orig| {
@@ -174,7 +193,7 @@ fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: boo
       try w.writeAll("\x1b[H\x1b[2J\x1b[3J");
 
       var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-      try ink.render(w, root, .{ .highlighter = &highlighter });
+      try ink.render(w, root, .{ .highlighter = &highlighter, .margin = mem.margin });
 
       if (timing) {
         const elapsed: f64 = @floatFromInt(end.since(start));
