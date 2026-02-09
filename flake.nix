@@ -60,7 +60,7 @@
 
             meta = with pkgs.lib; {
               description = "A tiny, fast markdown renderer for your terminal";
-              homepage = "https://github.com/matthew-hre/ink";
+              homepage = "https://github.com/theMackabu/ink";
               license = licenses.mit;
               mainProgram = "ink";
             };
