@@ -322,9 +322,10 @@ pub const Viewer = struct {
     const ch = self.contentHeight();
     const content = win.child(.{ .y_off = 0, .height = ch });
 
-    var row: u16 = 0;
-    while (row < ch) : (row += 1) {
-      const vrow = self.scroll + row;
+    var screen_y: u16 = 0;
+    var vrow_off: usize = 0;
+    while (screen_y < ch) {
+      const vrow = self.scroll + vrow_off;
       if (vrow >= self.totalVisualRows()) break;
 
       const pos = self.wrap.visualToLogical(vrow);
@@ -334,12 +335,13 @@ pub const Viewer = struct {
 
       const is_yank_target = self.yank_active and self.yank_target != null and pos.line_idx == self.yank_target.?;
       if ((self.show_lines or self.yank_active) and pos.wrap_row == 0) {
-        self.drawLineNumber(content, row, pos.line_idx, is_current_match or is_yank_target);
+        self.drawLineNumber(content, screen_y, pos.line_idx, is_current_match or is_yank_target);
       }
 
       if (pos.wrap_row == 0 and self.isImageLine(pos.line_idx)) {
-        const img_rows = self.drawImage(content, row, pos.line_idx);
-        row += img_rows -| 1;
+        const img_rows = self.drawImage(content, screen_y, pos.line_idx);
+        screen_y += img_rows;
+        vrow_off += 1;
         continue;
       }
 
@@ -349,7 +351,9 @@ pub const Viewer = struct {
       else
         null;
       const indent: u16 = if (pos.wrap_row > 0) 2 else 0;
-      self.drawWrappedContent(content, row, line, wp, next_wp, is_match, is_current_match, indent);
+      self.drawWrappedContent(content, screen_y, line, wp, next_wp, is_match, is_current_match, indent);
+      screen_y += 1;
+      vrow_off += 1;
     }
   }
 
@@ -461,10 +465,11 @@ pub const Viewer = struct {
   fn drawScrollbar(self: *Viewer, win: vaxis.Window) void {
     const ch = self.contentHeight();
     const total = self.totalVisualRows();
-    if (total <= ch or ch == 0) return;
+    const pad: usize = @min(ch / 3, 5);
+    if (total + pad <= ch or ch == 0) return;
 
     const sb_col = self.term_w -| 1;
-    const total_f: f64 = @floatFromInt(total);
+    const total_f: f64 = @floatFromInt(total + pad);
     const visible: f64 = @floatFromInt(ch);
     const thumb_h_f = @max(1.0, (visible / total_f) * visible);
     const thumb_h: u16 = @intFromFloat(thumb_h_f);
@@ -473,14 +478,14 @@ pub const Viewer = struct {
     const track = ch -| thumb_h;
     const thumb_top: u16 = if (max_s > 0)
       @intFromFloat((scroll_f / max_s) * @as(f64, @floatFromInt(track)))
-    else
-      0;
+    else 0;
 
     const track_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 40, 40, 50 } } };
     const thumb_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 100, 100, 120 } } };
 
+    const sb_pad: u16 = 1;
     var row: u16 = 0;
-    while (row < ch) : (row += 1) {
+    while (row + sb_pad < ch) : (row += 1) {
       const in_thumb = row >= thumb_top and row < thumb_top + thumb_h;
       win.writeCell(sb_col, row, .{
         .char = .{ .grapheme = if (in_thumb) "▐" else "│", .width = 1 },
