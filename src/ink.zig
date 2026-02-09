@@ -2,7 +2,7 @@ const node = @import("node.zig");
 const parser = @import("parser.zig");
 const output = @import("output.zig");
 const hl = @import("highlight.zig");
-pub const tui = @import("tui.zig");
+pub const tui = @import("view.zig");
 
 pub const Highlighter = hl.Highlighter;
 

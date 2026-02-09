@@ -648,7 +648,7 @@ fn parseIndentedItem(arena: *Arena, s: *Scanner, root: *Node) !bool {
 
 fn parsePlainText(arena: *Arena, s: *Scanner, root: *Node) !void {
   const line = s.readLine();
-  if (line.len == 0) {
+  if (line.len == 0 or std.mem.trim(u8, line, " \t").len == 0) {
     s.skipNewline();
     return;
   }

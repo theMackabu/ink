@@ -444,6 +444,7 @@ const Ctx = struct {
     const tw = termWidth();
     const width = if (self.tui) tw - 10 else tw / 3;
     try self.w.writeAll("\n");
+    if (self.tui) try self.w.writeAll("\x1b_R\x1b\\");
     try self.writeMargin();
     try self.w.writeAll(ansi.DIM);
     var i: u16 = 0;
