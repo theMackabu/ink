@@ -20,6 +20,13 @@ pub fn getGitBranch(b: *std.Build) ?[]const u8 {
   return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 }
 
+pub fn readVersionFile(b: *std.Build) ?[]const u8 {
+  const path = b.build_root.path orelse return null;
+  const file = std.fs.path.join(b.allocator, &.{ path, "ink.version" }) catch return null;
+  const contents = std.fs.cwd().readFileAlloc(b.allocator, file, 64) catch return null;
+  return std.mem.trim(u8, contents, &std.ascii.whitespace);
+}
+
 pub fn isGitDirty(b: *std.Build) bool {
   const result = std.process.Child.run(.{
     .allocator = b.allocator,
