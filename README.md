@@ -33,3 +33,12 @@ zig build                  # build
 zig build run -- file.md   # build & run
 zig build install-local    # install to ~/.local/bin
 ```
+
+### Nix
+
+```sh
+nix develop                # enter dev shell with zig
+direnv allow               # (automatically) enter dev shell with zig
+nix build                  # build
+nix run -- file.md         # build & run
+```
