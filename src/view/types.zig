@@ -14,6 +14,7 @@ pub const Event = union(enum) {
   focus_in,
   focus_out,
   file_changed,
+  toast_dismiss,
 };
 
 pub const FragmentLink = struct {
@@ -43,6 +44,16 @@ pub const ParseResult = struct {
   lines: []const Line,
   headings: []const HeadingEntry,
   links: []const FragmentLink,
+
+  pub fn deinit(self: ParseResult, alloc: std.mem.Allocator) void {
+    for (self.lines) |line| {
+      alloc.free(line.raw);
+      alloc.free(line.segments);
+    }
+    alloc.free(self.lines);
+    alloc.free(self.headings);
+    alloc.free(self.links);
+  }
 };
 
 pub const WrapPoint = struct {

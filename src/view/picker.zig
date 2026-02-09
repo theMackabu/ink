@@ -1,7 +1,12 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-const vxfw = vaxis.vxfw;
 const search = @import("search.zig");
+
+const types = @import("types.zig");
+const Event = types.Event;
+
+const view = @import("../view.zig");
+const Tui = view.Tui;
 
 pub const FileEntry = struct {
   path: []const u8,
@@ -13,71 +18,6 @@ const FileRow = struct {
   path: []const u8,
   time_str: []const u8,
   size_str: []const u8,
-  selected: bool = false,
-  hovered: bool = false,
-
-  pub fn widget(self: *const FileRow) vxfw.Widget {
-    return .{
-      .userdata = @constCast(self),
-      .drawFn = FileRow.typeErasedDrawFn,
-    };
-  }
-
-  fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const FileRow = @ptrCast(@alignCast(ptr));
-    const max = ctx.max.size();
-    const w = max.width;
-
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 1 });
-    const bg: vaxis.Style = if (self.selected) .{ .bg = .{ .rgb = .{ 50, 50, 70 } } }
-    else if (self.hovered) .{ .bg = .{ .rgb = .{ 38, 38, 52 } } }
-    else .{};
-
-    @memset(surface.buffer, .{ .style = bg });
-
-    var col: u16 = 0;
-
-    if (self.selected) {
-      surface.writeCell(0, 0, .{
-        .char = .{ .grapheme = "▌", .width = 1 },
-        .style = .{ .fg = .{ .rgb = .{ 130, 90, 220 } }, .bg = bg.bg },
-      });
-    }
-    col = 2;
-
-    const name_style: vaxis.Style = .{
-      .fg = if (self.selected)
-        .{ .rgb = .{ 230, 230, 250 } }
-      else if (self.hovered)
-        .{ .rgb = .{ 190, 190, 210 } }
-      else
-        .{ .rgb = .{ 170, 170, 190 } },
-      .bg = bg.bg,
-      .bold = self.selected,
-    };
-
-    col = writeStr(surface, col, 0, self.path, name_style);
-
-    const meta_style: vaxis.Style = .{
-      .fg = .{ .rgb = .{ 80, 80, 100 } },
-      .bg = bg.bg,
-    };
-    
-    const dot_style: vaxis.Style = .{
-      .fg = .{ .rgb = .{ 55, 55, 70 } },
-      .bg = bg.bg,
-    };
-
-    const meta_len: u16 = @intCast(@min(self.size_str.len + self.time_str.len + 3, w));
-    const meta_start = w -| meta_len -| 1;
-    if (meta_start > col + 2) {
-      var mc = writeStr(surface, meta_start, 0, self.size_str, meta_style);
-      mc = writeStr(surface, mc + 1, 0, "·", dot_style);
-      _ = writeStr(surface, mc + 1, 0, self.time_str, meta_style);
-    }
-
-    return surface;
-  }
 };
 
 pub const Action = enum { view, edit };
@@ -93,149 +33,18 @@ const Picker = struct {
   rows: []FileRow,
   filtered_rows: []FileRow,
   filter_buf: []FileRow,
-  list_view: vxfw.ListView,
+  cursor: usize = 0,
+  scroll: usize = 0,
   search_state: search.SearchState,
   string_allocs: std.ArrayList([]const u8),
   selected: ?[]const u8 = null,
   action: Action = .view,
   show_help: bool = false,
   hovered_idx: ?usize = null,
-
-  pub fn widget(self: *Picker) vxfw.Widget {
-    return .{
-      .userdata = self,
-      .eventHandler = Picker.typeErasedEventHandler,
-      .drawFn = Picker.typeErasedDrawFn,
-    };
-  }
-
-  fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-    const self: *Picker = @ptrCast(@alignCast(ptr));
-    switch (event) {
-      .init => return ctx.requestFocus(self.list_view.widget()),
-      .key_press => |key| {
-        if (key.matches('c', .{ .ctrl = true })) {
-          ctx.quit = true;
-          return;
-        }
-
-        if (self.search_state.active) {
-          if (key.matches(vaxis.Key.escape, .{})) {
-            self.search_state.active = false;
-            self.search_state.clear();
-            self.applyFilter();
-            try ctx.requestFocus(self.list_view.widget());
-            return ctx.consumeAndRedraw();
-          }
-          if (key.matches(vaxis.Key.enter, .{})) {
-            self.search_state.active = false;
-            try ctx.requestFocus(self.list_view.widget());
-            return ctx.consumeAndRedraw();
-          }
-          if (key.matches('j', .{ .ctrl = true }) or key.matches(vaxis.Key.down, .{})) {
-            return self.list_view.handleEvent(ctx, event);
-          }
-          if (key.matches('k', .{ .ctrl = true }) or key.matches(vaxis.Key.up, .{})) {
-            return self.list_view.handleEvent(ctx, event);
-          }
-          if (key.matches(vaxis.Key.backspace, .{})) {
-            if (self.search_state.query.items.len > 0) {
-              _ = self.search_state.query.pop();
-              self.applyFilter();
-            }
-            return ctx.consumeAndRedraw();
-          }
-          if (key.text) |text| {
-            self.search_state.query.appendSlice(self.alloc, text) catch {};
-            self.applyFilter();
-            return ctx.consumeAndRedraw();
-          }
-          return;
-        }
-
-        if (key.matches('q', .{})) {
-          ctx.quit = true;
-          return;
-        }
-        if (key.matches(vaxis.Key.enter, .{})) {
-          if (self.list_view.cursor < self.filtered_rows.len) {
-            self.selected = self.filtered_rows[self.list_view.cursor].path;
-          }
-          ctx.quit = true;
-          return;
-        }
-        if (key.matches('e', .{})) {
-          if (self.list_view.cursor < self.filtered_rows.len) {
-            self.selected = self.filtered_rows[self.list_view.cursor].path;
-            self.action = .edit;
-          }
-          ctx.quit = true;
-          return;
-        }
-        if (key.matches('?', .{ .shift = true })) {
-          self.show_help = !self.show_help;
-          return ctx.consumeAndRedraw();
-        }
-        if (key.matches('r', .{})) {
-          self.refresh() catch {};
-          return ctx.consumeAndRedraw();
-        }
-        if (key.matches('/', .{})) {
-          self.search_state.active = true;
-          try ctx.requestFocus(self.widget());
-          return ctx.consumeAndRedraw();
-        }
-        if (key.matches('g', .{})) {
-          self.list_view.cursor = 0;
-          self.list_view.ensureScroll();
-          return ctx.consumeAndRedraw();
-        }
-        if (key.matches('G', .{ .shift = true })) {
-          if (self.filtered_rows.len > 0) {
-            self.list_view.cursor = @intCast(self.filtered_rows.len - 1);
-            self.list_view.ensureScroll();
-          }
-          return ctx.consumeAndRedraw();
-        }
-        return self.list_view.handleEvent(ctx, event);
-      },
-      .focus_in => return ctx.requestFocus(self.list_view.widget()),
-      .mouse => |mouse| {
-        if (mouse.button == .wheel_up or mouse.button == .wheel_down) {
-          return self.list_view.handleEvent(ctx, .{ .mouse = mouse });
-        }
-        const row_idx = self.mouseToIndex(mouse.row);
-        if (mouse.type == .motion or mouse.type == .drag) {
-          if (row_idx != self.hovered_idx) {
-            self.hovered_idx = row_idx;
-            return ctx.consumeAndRedraw();
-          }
-        }
-        if (mouse.type == .press and mouse.button == .left) {
-          if (row_idx) |idx| {
-            self.list_view.cursor = @intCast(idx);
-            self.selected = self.filtered_rows[idx].path;
-            ctx.quit = true;
-          }
-        }
-      },
-      .mouse_leave => {
-        if (self.hovered_idx != null) {
-          self.hovered_idx = null;
-          return ctx.consumeAndRedraw();
-        }
-      },
-      else => {},
-    }
-  }
-
-  fn mouseToIndex(self: *Picker, mouse_row: i16) ?usize {
-    if (mouse_row < 2) return null;
-    const row: usize = @intCast(mouse_row - 2);
-    const actual = self.list_view.scroll.top + row;
-    if (actual >= self.filtered_rows.len) return null;
-    return actual;
-  }
+  term_w: u16 = 0,
+  term_h: u16 = 0,
+  count_buf: [48]u8 = undefined,
+  count_len: usize = 0,
 
   fn applyFilter(self: *Picker) void {
     const needle = self.search_state.query.items;
@@ -252,8 +61,9 @@ const Picker = struct {
       }
       self.filtered_rows = self.filter_buf[0..count];
     }
-    self.list_view.item_count = @intCast(self.filtered_rows.len);
-    self.list_view.cursor = 0;
+    self.cursor = 0;
+    self.scroll = 0;
+    self.updateCount();
   }
 
   fn refresh(self: *Picker) !void {
@@ -287,68 +97,184 @@ const Picker = struct {
     self.applyFilter();
   }
 
-  fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *Picker = @ptrCast(@alignCast(ptr));
-    const max = ctx.max.size();
-
-    for (self.filtered_rows, 0..) |*row, i| {
-      row.selected = (i == self.list_view.cursor);
-      row.hovered = if (self.hovered_idx) |h| (i == h and !row.selected) else false;
-    }
-
-    const header = try self.drawHeader(ctx, max.width);
-    const footer = try self.drawFooter(ctx, max.width);
+  fn listHeight(self: *Picker) usize {
     const footer_h: u16 = if (!self.show_help) 1
       else if (self.search_state.active) 3
       else 4;
-
-    const list_height = max.height -| (2 + footer_h + 1);
-    const list_surface: vxfw.SubSurface = .{
-      .origin = .{ .row = 2, .col = 0 },
-      .surface = try self.list_view.draw(ctx.withConstraints(
-        .{ .width = max.width, .height = 0 },
-        .{ .width = max.width, .height = list_height },
-      )),
-    };
-
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
-    children[0] = .{
-      .origin = .{ .row = 0, .col = 0 },
-      .surface = header,
-    };
-    children[1] = list_surface;
-    children[2] = .{
-      .origin = .{ .row = max.height -| (footer_h + 1), .col = 2 },
-      .surface = footer,
-    };
-
-    return .{
-      .size = max,
-      .widget = self.widget(),
-      .buffer = &.{},
-      .children = children,
-    };
+    return self.term_h -| (2 + footer_h + 1);
   }
 
-  fn drawHeader(self: *Picker, ctx: vxfw.DrawContext, w: u16) std.mem.Allocator.Error!vxfw.Surface {
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 2 });
+  fn ensureScroll(self: *Picker) void {
+    const h = self.listHeight();
+    if (h == 0) return;
+    if (self.cursor < self.scroll) {
+      self.scroll = self.cursor;
+    } else if (self.cursor >= self.scroll + h) {
+      self.scroll = self.cursor - h + 1;
+    }
+  }
 
+  fn handleKeyPress(self: *Picker, key: vaxis.Key) enum { none, quit, done } {
+    if (key.matches('c', .{ .ctrl = true })) return .quit;
+
+    if (self.search_state.active) {
+      if (key.matches(vaxis.Key.escape, .{})) {
+        self.search_state.active = false;
+        self.search_state.clear();
+        self.applyFilter();
+        return .none;
+      }
+      if (key.matches(vaxis.Key.enter, .{})) {
+        self.search_state.active = false;
+        return .none;
+      }
+      if (key.matches('j', .{ .ctrl = true }) or key.matches(vaxis.Key.down, .{})) {
+        self.moveCursor(1);
+        return .none;
+      }
+      if (key.matches('k', .{ .ctrl = true }) or key.matches(vaxis.Key.up, .{})) {
+        self.moveCursor(-1);
+        return .none;
+      }
+      if (key.matches(vaxis.Key.backspace, .{})) {
+        if (self.search_state.query.items.len > 0) {
+          _ = self.search_state.query.pop();
+          self.applyFilter();
+        }
+        return .none;
+      }
+      if (key.text) |text| {
+        self.search_state.query.appendSlice(self.alloc, text) catch {};
+        self.applyFilter();
+        return .none;
+      }
+      return .none;
+    }
+
+    if (key.matches('q', .{})) return .quit;
+    if (key.matches(vaxis.Key.enter, .{})) {
+      if (self.cursor < self.filtered_rows.len) {
+        self.selected = self.filtered_rows[self.cursor].path;
+      }
+      return .done;
+    }
+    if (key.matches('e', .{})) {
+      if (self.cursor < self.filtered_rows.len) {
+        self.selected = self.filtered_rows[self.cursor].path;
+        self.action = .edit;
+      }
+      return .done;
+    }
+    if (key.matches('?', .{ .shift = true })) {
+      self.show_help = !self.show_help;
+      return .none;
+    }
+    if (key.matches('r', .{})) {
+      self.refresh() catch {};
+      return .none;
+    }
+    if (key.matches('/', .{})) {
+      self.search_state.active = true;
+      return .none;
+    }
+    if (key.matches('g', .{})) {
+      self.cursor = 0;
+      self.ensureScroll();
+      return .none;
+    }
+    if (key.matches('G', .{ .shift = true })) {
+      if (self.filtered_rows.len > 0) {
+        self.cursor = self.filtered_rows.len - 1;
+        self.ensureScroll();
+      }
+      return .none;
+    }
+    if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+      self.moveCursor(1);
+      return .none;
+    }
+    if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+      self.moveCursor(-1);
+      return .none;
+    }
+    return .none;
+  }
+
+  fn handleMouse(self: *Picker, mouse: vaxis.Mouse) enum { none, done } {
+    if (mouse.button == .wheel_up) {
+      self.moveCursor(-3);
+      return .none;
+    }
+    if (mouse.button == .wheel_down) {
+      self.moveCursor(3);
+      return .none;
+    }
+    const row_idx = self.mouseToIndex(mouse.row);
+    if (mouse.type == .motion or mouse.type == .drag) {
+      self.hovered_idx = row_idx;
+    }
+    if (mouse.type == .press and mouse.button == .left) {
+      if (row_idx) |idx| {
+        self.cursor = idx;
+        self.selected = self.filtered_rows[idx].path;
+        return .done;
+      }
+    }
+    return .none;
+  }
+
+  fn moveCursor(self: *Picker, delta: i32) void {
+    if (self.filtered_rows.len == 0) return;
+    const max: i32 = @intCast(self.filtered_rows.len - 1);
+    const cur: i32 = @intCast(self.cursor);
+    self.cursor = @intCast(std.math.clamp(cur + delta, 0, max));
+    self.ensureScroll();
+  }
+
+  fn mouseToIndex(self: *Picker, mouse_row: i16) ?usize {
+    if (mouse_row < 2) return null;
+    const row: usize = @intCast(mouse_row - 2);
+    const actual = self.scroll + row;
+    if (actual >= self.filtered_rows.len) return null;
+    return actual;
+  }
+
+  fn draw(self: *Picker, win: vaxis.Window) void {
+    win.clear();
+    self.drawHeader(win);
+    self.drawList(win);
+    self.drawFooter(win);
+  }
+
+  fn updateCount(self: *Picker) void {
+    const result = if (self.search_state.query.items.len > 0)
+      std.fmt.bufPrint(&self.count_buf, " {d}/{d} document{s}", .{
+        self.filtered_rows.len,
+        self.rows.len,
+        @as([]const u8, if (self.rows.len != 1) "s" else ""),
+      })
+    else
+      std.fmt.bufPrint(&self.count_buf, " {d} document{s}", .{
+        self.rows.len,
+        @as([]const u8, if (self.rows.len != 1) "s" else ""),
+      });
+    self.count_len = if (result) |s| s.len else |_| 0;
+  }
+
+  fn drawHeader(self: *Picker, win: vaxis.Window) void {
     if (self.search_state.active) {
       const prompt_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 130, 90, 220 } } };
       const text_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 200, 200, 220 } } };
-      var col = writeStr(surface, 1, 0, "/", prompt_style);
-      col = writeStr(surface, col, 0, self.search_state.query.items, text_style);
-      surface.writeCell(col, 0, .{
+      var col = writeStr(win, 1, 0, "/", prompt_style);
+      col = writeStr(win, col, 0, self.search_state.query.items, text_style);
+      win.writeCell(col, 0, .{
         .char = .{ .grapheme = "▏", .width = 1 },
         .style = .{ .fg = .{ .rgb = .{ 130, 90, 220 } } },
       });
 
-      const count_str = try std.fmt.allocPrint(ctx.arena, "{d}/{d}", .{
-        self.filtered_rows.len,
-        self.rows.len,
-      });
-      const count_start = w -| @as(u16, @intCast(@min(count_str.len + 1, w)));
-      _ = writeStr(surface, count_start, 0, count_str, .{
+      const count_str = self.count_buf[0..self.count_len];
+      const count_start = win.width -| @as(u16, @intCast(@min(count_str.len + 1, win.width)));
+      _ = writeStr(win, count_start, 0, count_str, .{
         .fg = .{ .rgb = .{ 80, 80, 100 } },
       });
     } else {
@@ -356,134 +282,183 @@ const Picker = struct {
         .fg = .{ .rgb = .{ 180, 180, 200 } },
         .bold = true,
       };
-      _ = writeStr(surface, 1, 0, "ink", title_style);
+      _ = writeStr(win, 1, 0, "ink", title_style);
 
-      const count_str = if (self.search_state.query.items.len > 0)
-        try std.fmt.allocPrint(ctx.arena, " {d}/{d} document{s}", .{
-          self.filtered_rows.len,
-          self.rows.len,
-          if (self.rows.len != 1) "s" else "",
-        })
-      else
-        try std.fmt.allocPrint(ctx.arena, " {d} document{s}", .{
-          self.rows.len,
-          if (self.rows.len != 1) "s" else "",
-        });
-      _ = writeStr(surface, 5, 0, count_str, .{
+      _ = writeStr(win, 5, 0, self.count_buf[0..self.count_len], .{
         .fg = .{ .rgb = .{ 80, 80, 100 } },
       });
     }
 
     const sep_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 50, 50, 65 } } };
     var col: u16 = 1;
-    while (col < w -| 1) : (col += 1) {
-      surface.writeCell(col, 1, .{
+    while (col < win.width -| 1) : (col += 1) {
+      win.writeCell(col, 1, .{
         .char = .{ .grapheme = "─", .width = 1 },
         .style = sep_style,
       });
     }
-
-    return surface;
   }
 
-  fn drawFooter(self: *Picker, ctx: vxfw.DrawContext, w: u16) std.mem.Allocator.Error!vxfw.Surface {
-    if (self.show_help) return self.drawHelp(ctx, w);
+  fn drawList(self: *Picker, win: vaxis.Window) void {
+    const h = self.listHeight();
+    const list = win.child(.{ .y_off = 2, .height = @intCast(h) });
 
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 1 });
+    var row: u16 = 0;
+    while (row < h) : (row += 1) {
+      const idx = self.scroll + row;
+      if (idx >= self.filtered_rows.len) break;
+      const file_row = self.filtered_rows[idx];
+      const is_selected = idx == self.cursor;
+      const is_hovered = if (self.hovered_idx) |hi| (idx == hi and !is_selected) else false;
+      self.drawRow(list, row, file_row, is_selected, is_hovered);
+    }
+  }
+
+  fn drawRow(self: *Picker, win: vaxis.Window, row: u16, file_row: FileRow, selected: bool, hovered: bool) void {
+    _ = self;
+    const w = win.width;
+    const bg: vaxis.Cell.Color = if (selected) .{ .rgb = .{ 50, 50, 70 } }
+      else if (hovered) .{ .rgb = .{ 38, 38, 52 } }
+      else .default;
+
+    const bg_style: vaxis.Style = .{ .bg = bg };
+    var c: u16 = 0;
+    while (c < w) : (c += 1) {
+      win.writeCell(c, row, .{ .style = bg_style });
+    }
+
+    var col: u16 = 0;
+    if (selected) {
+      win.writeCell(0, row, .{
+        .char = .{ .grapheme = "▌", .width = 1 },
+        .style = .{ .fg = .{ .rgb = .{ 130, 90, 220 } }, .bg = bg },
+      });
+    }
+    col = 2;
+
+    const name_style: vaxis.Style = .{
+      .fg = if (selected)
+        .{ .rgb = .{ 230, 230, 250 } }
+      else if (hovered)
+        .{ .rgb = .{ 190, 190, 210 } }
+      else
+        .{ .rgb = .{ 170, 170, 190 } },
+      .bg = bg,
+      .bold = selected,
+    };
+
+    col = writeStr(win, col, row, file_row.path, name_style);
+
+    const meta_style: vaxis.Style = .{
+      .fg = .{ .rgb = .{ 80, 80, 100 } },
+      .bg = bg,
+    };
+
+    const dot_style: vaxis.Style = .{
+      .fg = .{ .rgb = .{ 55, 55, 70 } },
+      .bg = bg,
+    };
+
+    const meta_len: u16 = @intCast(@min(file_row.size_str.len + file_row.time_str.len + 3, w));
+    const meta_start = w -| meta_len -| 1;
+    if (meta_start > col + 2) {
+      var mc = writeStr(win, meta_start, row, file_row.size_str, meta_style);
+      mc = writeStr(win, mc + 1, row, "·", dot_style);
+      _ = writeStr(win, mc + 1, row, file_row.time_str, meta_style);
+    }
+  }
+
+  fn drawFooter(self: *Picker, win: vaxis.Window) void {
+    const footer_h: u16 = if (!self.show_help) 1
+      else if (self.search_state.active) 3
+      else 4;
+    const footer_y = win.height -| (footer_h);
+    const footer = win.child(.{ .y_off = footer_y, .height = footer_h, .x_off = 2 });
+
+    if (self.show_help) {
+      self.drawHelp(footer);
+      return;
+    }
+
     const key_s: vaxis.Style = .{ .fg = .{ .rgb = .{ 110, 110, 135 } } };
     const desc_s: vaxis.Style = .{ .fg = .{ .rgb = .{ 75, 75, 95 } } };
     const dot_s: vaxis.Style = .{ .fg = .{ .rgb = .{ 55, 55, 70 } } };
 
     const binds: []const [3][]const u8 = if (self.search_state.active)
       &.{
-        .{ "enter", "confirm", " • " },
-        .{ "esc", "clear", " • " },
-        .{ "e", "edit", " • " },
+        .{ "enter", "confirm", " · " },
+        .{ "esc", "clear", " · " },
+        .{ "e", "edit", " · " },
         .{ "q", "quit", "" },
       }
     else
       &.{
-        .{ "/", "find", " • " },
-        .{ "r", "refresh", " • " },
-        .{ "e", "edit", " • " },
-        .{ "q", "quit", " • " },
+        .{ "/", "find", " · " },
+        .{ "r", "refresh", " · " },
+        .{ "e", "edit", " · " },
+        .{ "q", "quit", " · " },
         .{ "?", "more", "" },
       };
 
-    var col: u16 = 1;
+    var col: u16 = 0;
     for (binds) |b| {
-      col = writeStr(surface, col, 0, b[0], key_s);
-      col = writeStr(surface, col + 1, 0, b[1], desc_s);
-      if (b[2].len > 0) col = writeStr(surface, col, 0, b[2], dot_s);
+      col = writeStr(footer, col, 0, b[0], key_s);
+      col = writeStr(footer, col + 1, 0, b[1], desc_s);
+      if (b[2].len > 0) col = writeStr(footer, col, 0, b[2], dot_s);
     }
-    return surface;
   }
 
-  fn drawHelp(self: *Picker, ctx: vxfw.DrawContext, w: u16) std.mem.Allocator.Error!vxfw.Surface {
+  fn drawHelp(self: *Picker, win: vaxis.Window) void {
     const ks: vaxis.Style = .{ .fg = .{ .rgb = .{ 110, 110, 135 } } };
     const ds: vaxis.Style = .{ .fg = .{ .rgb = .{ 75, 75, 95 } } };
 
     if (self.search_state.active) {
-      const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 3 });
       var c: u16 = undefined;
-
-      c = writeStr(surface, 1, 0, "enter", ks);
-      _ = writeStr(surface, c + 1, 0, "confirm", ds);
-
-      c = writeStr(surface, 1, 1, "esc", ks);
-      _ = writeStr(surface, c + 1, 1, "cancel", ds);
-
-      c = writeStr(surface, 1, 2, "ctrl+j/ctrl+k ↑/↓", ks);
-      _ = writeStr(surface, c + 1, 2, "choose", ds);
-
-      return surface;
+      c = writeStr(win, 0, 0, "enter", ks);
+      _ = writeStr(win, c + 1, 0, "confirm", ds);
+      c = writeStr(win, 0, 1, "esc", ks);
+      _ = writeStr(win, c + 1, 1, "cancel", ds);
+      c = writeStr(win, 0, 2, "ctrl+j/ctrl+k ↑/↓", ks);
+      _ = writeStr(win, c + 1, 2, "choose", ds);
+      return;
     }
 
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = 4 });
     const col2: u16 = 22;
     var c: u16 = undefined;
 
-    c = writeStr(surface, 1, 0, "enter", ks);
-    _ = writeStr(surface, c + 1, 0, "open", ds);
-    c = writeStr(surface, col2, 0, "/", ks);
-    _ = writeStr(surface, c + 1, 0, "find", ds);
+    c = writeStr(win, 0, 0, "enter", ks);
+    _ = writeStr(win, c + 1, 0, "open", ds);
+    c = writeStr(win, col2, 0, "/", ks);
+    _ = writeStr(win, c + 1, 0, "find", ds);
 
-    c = writeStr(surface, 1, 1, "j/k ↑/↓", ks);
-    _ = writeStr(surface, c + 1, 1, "choose", ds);
-    c = writeStr(surface, col2, 1, "r", ks);
-    _ = writeStr(surface, c + 1, 1, "refresh", ds);
+    c = writeStr(win, 0, 1, "j/k ↑/↓", ks);
+    _ = writeStr(win, c + 1, 1, "choose", ds);
+    c = writeStr(win, col2, 1, "r", ks);
+    _ = writeStr(win, c + 1, 1, "refresh", ds);
 
-    c = writeStr(surface, 1, 2, "g/G", ks);
-    _ = writeStr(surface, c + 1, 2, "top/bottom", ds);
-    c = writeStr(surface, col2, 2, "e", ks);
-    _ = writeStr(surface, c + 1, 2, "edit", ds);
+    c = writeStr(win, 0, 2, "g/G", ks);
+    _ = writeStr(win, c + 1, 2, "top/bottom", ds);
+    c = writeStr(win, col2, 2, "e", ks);
+    _ = writeStr(win, c + 1, 2, "edit", ds);
 
-    _ = writeStr(surface, col2, 3, "q", ks);
-    _ = writeStr(surface, col2 + 2, 3, "quit", ds);
+    _ = writeStr(win, col2, 3, "q", ks);
+    _ = writeStr(win, col2 + 2, 3, "quit", ds);
 
-    _ = writeStr(surface, col2 + 14, 3, "?", ks);
-    _ = writeStr(surface, col2 + 16, 3, "close help", ds);
-
-    return surface;
-  }
-
-  fn widgetBuilder(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
-    const self: *const Picker = @ptrCast(@alignCast(ptr));
-    if (idx >= self.filtered_rows.len) return null;
-    return self.filtered_rows[idx].widget();
+    _ = writeStr(win, col2 + 14, 3, "?", ks);
+    _ = writeStr(win, col2 + 16, 3, "close help", ds);
   }
 };
 
-fn writeStr(surface: vxfw.Surface, start_col: u16, row: u16, text: []const u8, style: vaxis.Style) u16 {
+fn writeStr(win: vaxis.Window, start_col: u16, row: u16, text: []const u8, style: vaxis.Style) u16 {
   var col = start_col;
   var giter = vaxis.unicode.graphemeIterator(text);
   while (giter.next()) |g| {
-    if (col >= surface.size.width) break;
+    if (col >= win.width) break;
     const grapheme = g.bytes(text);
-    const w: u8 = @intCast(vaxis.gwidth.gwidth(grapheme, .unicode));
+    const w = win.gwidth(grapheme);
     if (w == 0) continue;
-    surface.writeCell(col, row, .{
-      .char = .{ .grapheme = grapheme, .width = w },
+    win.writeCell(col, row, .{
+      .char = .{ .grapheme = grapheme, .width = @intCast(w) },
       .style = style,
     });
     col +|= w;
@@ -571,7 +546,8 @@ fn formatSize(alloc: std.mem.Allocator, size: u64) ![]const u8 {
   return try std.fmt.allocPrint(alloc, "{d:.1} MB", .{mb});
 }
 
-pub fn run(alloc: std.mem.Allocator) !?PickerResult {
+pub fn run(tui: *Tui) !?PickerResult {
+  const alloc = tui.alloc;
   const files = try collectMarkdownFiles(alloc);
   const rows = try alloc.alloc(FileRow, files.len);
   const filtered = try alloc.alloc(FileRow, files.len);
@@ -589,7 +565,15 @@ pub fn run(alloc: std.mem.Allocator) !?PickerResult {
     };
   }
 
-  const picker = try alloc.create(Picker);
+  var picker: Picker = .{
+    .alloc = alloc,
+    .files = files,
+    .rows = rows,
+    .filtered_rows = filtered[0..rows.len],
+    .filter_buf = filtered,
+    .search_state = search.SearchState.init(alloc),
+    .string_allocs = string_allocs,
+  };
   defer {
     for (picker.string_allocs.items) |s| alloc.free(s);
     picker.string_allocs.deinit(alloc);
@@ -598,36 +582,47 @@ pub fn run(alloc: std.mem.Allocator) !?PickerResult {
     alloc.free(picker.rows);
     alloc.free(picker.filter_buf);
     picker.search_state.deinit();
-    alloc.destroy(picker);
   }
 
-  picker.* = .{
-    .alloc = alloc,
-    .files = files,
-    .rows = rows,
-    .filtered_rows = filtered[0..rows.len],
-    .filter_buf = filtered,
-    .search_state = search.SearchState.init(alloc),
-    .string_allocs = string_allocs,
-    .list_view = .{
-      .draw_cursor = false,
-      .wheel_scroll = 3,
-      .item_count = @intCast(files.len),
-      .children = .{
-        .builder = .{
-          .userdata = picker,
-          .buildFn = Picker.widgetBuilder,
-        },
-      },
-    },
-  };
-
   @memcpy(picker.filtered_rows, rows);
+  picker.updateCount();
 
-  var app = try vxfw.App.init(alloc);
-  defer app.deinit();
+  {
+    const win = tui.vx.window();
+    picker.term_w = win.width;
+    picker.term_h = win.height;
+    picker.draw(win);
+    try tui.vx.render(tui.tty.writer());
+  }
 
-  try app.run(picker.widget(), .{});
+  while (true) {
+    const event = tui.loop.nextEvent();
+    switch (event) {
+      .key_press => |key| {
+        switch (picker.handleKeyPress(key)) {
+          .quit => return null,
+          .done => break,
+          .none => {},
+        }
+      },
+      .mouse => |mouse| {
+        switch (picker.handleMouse(mouse)) {
+          .done => break,
+          .none => {},
+        }
+      },
+      .winsize => |ws| {
+        try tui.vx.resize(alloc, tui.tty.writer(), ws);
+      },
+      else => {},
+    }
+
+    const win = tui.vx.window();
+    picker.term_w = win.width;
+    picker.term_h = win.height;
+    picker.draw(win);
+    try tui.vx.render(tui.tty.writer());
+  }
 
   if (picker.selected) |path| {
     return .{

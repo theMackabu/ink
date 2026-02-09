@@ -55,7 +55,16 @@ pub const Viewer = struct {
   term_w: u16 = 80,
   dragging: bool = false,
   show_help: bool = false,
+  has_picker: bool = false,
+  yank_active: bool = false,
+  yank_ready: bool = false,
+  yank_target: ?usize = null,
+  yank_input: [8]u8 = undefined,
+  yank_input_len: u8 = 0,
+  yank_restore_lines: bool = false,
   wrap: WrapLayout,
+  toast_msg: ?[]const u8 = null,
+  toast_time: ?std.time.Instant = null,
 
   info_buf: [32]u8 = undefined,
   info_slice: []const u8 = "",
@@ -65,12 +74,12 @@ pub const Viewer = struct {
   pos_slice: []const u8 = "",
 
   pub fn contentHeight(self: *const Viewer) u16 {
-    const footer_h: u16 = if (self.show_help) 6 else 1;
+    const footer_h: u16 = if (self.show_help) 8 else 1;
     return self.term_h -| footer_h;
   }
 
   pub fn gutterWidth(self: *const Viewer) u16 {
-    return if (self.show_lines) self.num_w else 0;
+    return if (self.show_lines or self.yank_active) self.num_w else 0;
   }
 
   pub fn contentWidth(self: *const Viewer) u16 {
@@ -136,6 +145,34 @@ pub const Viewer = struct {
     self.scrollToMatch();
   }
 
+  pub fn nextHeading(self: *Viewer) void {
+    if (self.headings.len == 0) return;
+    const current_line = self.wrap.visualToLogical(self.scroll).line_idx;
+    for (self.headings) |h| {
+      if (h.line_idx > current_line) {
+        const vrow = self.wrap.logicalToVisual(h.line_idx);
+        self.scroll = if (vrow > 2) vrow - 2 else 0;
+        self.clampScroll();
+        return;
+      }
+    }
+  }
+
+  pub fn prevHeading(self: *Viewer) void {
+    if (self.headings.len == 0) return;
+    const current_line = self.wrap.visualToLogical(self.scroll).line_idx;
+    var i: usize = self.headings.len;
+    while (i > 0) {
+      i -= 1;
+      if (self.headings[i].line_idx < current_line) {
+        const vrow = self.wrap.logicalToVisual(self.headings[i].line_idx);
+        self.scroll = if (vrow > 2) vrow - 2 else 0;
+        self.clampScroll();
+        return;
+      }
+    }
+  }
+
   pub fn scrollToRow(self: *Viewer, row: i16) void {
     const ch: f64 = @floatFromInt(self.contentHeight() -| 1);
     const total: f64 = @floatFromInt(self.totalVisualRows());
@@ -183,11 +220,17 @@ pub const Viewer = struct {
     } return null;
   }
 
+  pub fn showToast(self: *Viewer, msg: []const u8) void {
+    self.toast_msg = msg;
+    self.toast_time = std.time.Instant.now() catch null;
+  }
+
   pub fn draw(self: *Viewer, win: vaxis.Window) void {
     win.clear();
     self.drawContent(win);
     self.drawScrollbar(win);
     self.drawFooter(win);
+    self.drawToast(win);
   }
 
   fn drawContent(self: *Viewer, win: vaxis.Window) void {
@@ -204,8 +247,9 @@ pub const Viewer = struct {
       const is_match = self.isMatchLine(pos.line_idx);
       const is_current_match = self.isCurrentMatch(pos.line_idx);
 
-      if (self.show_lines and pos.wrap_row == 0) {
-        self.drawLineNumber(content, row, pos.line_idx, is_current_match);
+      const is_yank_target = self.yank_active and self.yank_target != null and pos.line_idx == self.yank_target.?;
+      if ((self.show_lines or self.yank_active) and pos.wrap_row == 0) {
+        self.drawLineNumber(content, row, pos.line_idx, is_current_match or is_yank_target);
       }
 
       const wp = self.wrap.wrapPoint(pos.line_idx, pos.wrap_row);
@@ -405,7 +449,23 @@ pub const Viewer = struct {
     left = writeStr(bar, left + 1, 0, self.filename, name_style);
     left = writeStr(bar, left + 1, 0, " ", bg);
 
-    if (self.search.active) {
+    if (self.yank_active) {
+      const prompt_style: vaxis.Style = .{
+        .bg = .{ .rgb = .{ 40, 40, 50 } },
+        .fg = .{ .rgb = .{ 255, 200, 60 } },
+      };
+      left = writeStr(bar, left, 0, ":", prompt_style);
+      left = writeStr(bar, left, 0, self.yank_input[0..self.yank_input_len], .{
+        .bg = .{ .rgb = .{ 40, 40, 50 } },
+        .fg = .{ .rgb = .{ 255, 255, 255 } },
+      });
+      if (!self.yank_ready) {
+        bar.writeCell(left, 0, .{
+          .char = .{ .grapheme = " " },
+          .style = .{ .bg = .{ .rgb = .{ 200, 200, 200 } } },
+        });
+      }
+    } else if (self.search.active) {
       const prompt_style: vaxis.Style = .{
         .bg = .{ .rgb = .{ 40, 40, 50 } },
         .fg = .{ .rgb = .{ 255, 200, 60 } },
@@ -435,7 +495,20 @@ pub const Viewer = struct {
       const ik: vaxis.Style = .{ .bg = bg.bg, .fg = .{ .rgb = .{ 143, 143, 176 } } };
       const id: vaxis.Style = .{ .bg = bg.bg, .fg = .{ .rgb = .{ 98, 98, 124 } } };
       const it: vaxis.Style = .{ .bg = bg.bg, .fg = .{ .rgb = .{ 72, 72, 91 } } };
-      if (self.search.matches.items.len > 0) {
+      if (self.yank_active) {
+        left += 2;
+        if (self.yank_ready) {
+          left = writeStr(bar, left, 0, "enter", ik);
+          left = writeStr(bar, left + 1, 0, "copy", id);
+          left = writeStr(bar, left, 0, " • ", it);
+        } else {
+          left = writeStr(bar, left, 0, "enter", ik);
+          left = writeStr(bar, left + 1, 0, "go to line", id);
+          left = writeStr(bar, left, 0, " • ", it);
+        }
+        left = writeStr(bar, left, 0, "esc", ik);
+        _ = writeStr(bar, left + 1, 0, "cancel", id);
+      } else if (self.search.matches.items.len > 0) {
         left += 2;
         left = writeStr(bar, left, 0, "n/N", ik);
         left = writeStr(bar, left + 1, 0, "next/prev", id);
@@ -490,27 +563,61 @@ pub const Viewer = struct {
       c = writeStr(help, 1, 2, "esc", ks);
       _ = writeStr(help, c + 1, 2, "clear search", ds);
     } else {
-      const help = win.child(.{ .x_off = 1, .y_off = y, .height = 4 });
-      const col2: u16 = 22;
+      const help = win.child(.{ .x_off = 1, .y_off = y, .height = 6 });
+      const col2: u16 = 21;
+      const col3: u16 = 40;
+      const col4: u16 = 59;
       var c: u16 = undefined;
 
-      c = writeStr(help, 1, 0, "/", ks);
+      c = writeStr(help, 1, 0, "k/↑", ks);
+      _ = writeStr(help, c + 1, 0, "up", ds);
+      c = writeStr(help, col2, 0, "g/home", ks);
+      _ = writeStr(help, c + 1, 0, "top", ds);
+      c = writeStr(help, col3, 0, "/", ks);
       _ = writeStr(help, c + 1, 0, "find", ds);
-      c = writeStr(help, col2, 0, "q", ks);
-      _ = writeStr(help, c + 1, 0, "quit", ds);
 
-      c = writeStr(help, 1, 1, "j/k ↑/↓", ks);
-      _ = writeStr(help, c + 1, 1, "scroll", ds);
-      c = writeStr(help, col2, 1, "l", ks);
-      _ = writeStr(help, c + 1, 1, "lines", ds);
+      c = writeStr(help, 1, 1, "j/↓", ks);
+      _ = writeStr(help, c + 1, 1, "down", ds);
+      c = writeStr(help, col2, 1, "G/end", ks);
+      _ = writeStr(help, c + 1, 1, "bottom", ds);
+      c = writeStr(help, col3, 1, "t", ks);
+      _ = writeStr(help, c + 1, 1, "outline", ds);
 
-      c = writeStr(help, 1, 2, "g/G", ks);
-      _ = writeStr(help, c + 1, 2, "top/bottom", ds);
-      c = writeStr(help, col2, 2, "U", ks);
-      _ = writeStr(help, c + 1, 2, "urls", ds);
+      c = writeStr(help, 1, 2, "b/pgup", ks);
+      _ = writeStr(help, c + 1, 2, "page up", ds);
+      c = writeStr(help, col2, 2, "u", ks);
+      _ = writeStr(help, c + 1, 2, "½ page up", ds);
+      c = writeStr(help, col3, 2, "c", ks);
+      _ = writeStr(help, c + 1, 2, "copy document", ds);
 
-      _ = writeStr(help, col2, 3, "?", ks);
-      _ = writeStr(help, col2 + 2, 3, "close help", ds);
+      c = writeStr(help, 1, 3, "f/pgdn", ks);
+      _ = writeStr(help, c + 1, 3, "page down", ds);
+      c = writeStr(help, col2, 3, "d", ks);
+      _ = writeStr(help, c + 1, 3, "½ page down", ds);
+      c = writeStr(help, col3, 3, "y", ks);
+      _ = writeStr(help, c + 1, 3, "yank mode", ds);
+      if (self.has_picker) {
+        c = writeStr(help, col4, 3, "esc", ks);
+        _ = writeStr(help, c + 1, 3, "back to files", ds);
+      }
+
+      c = writeStr(help, 1, 4, "]", ks);
+      _ = writeStr(help, c + 1, 4, "next heading", ds);
+      c = writeStr(help, col2, 4, "U", ks);
+      _ = writeStr(help, c + 1, 4, "urls", ds);
+      c = writeStr(help, col3, 4, "e", ks);
+      _ = writeStr(help, c + 1, 4, "edit", ds);
+      c = writeStr(help, col4, 4, "q", ks);
+      _ = writeStr(help, c + 1, 4, "quit", ds);
+
+      c = writeStr(help, 1, 5, "[", ks);
+      _ = writeStr(help, c + 1, 5, "prev heading", ds);
+      c = writeStr(help, col2, 5, "l", ks);
+      _ = writeStr(help, c + 1, 5, "line numbers", ds);
+      c = writeStr(help, col3, 5, "r", ks);
+      _ = writeStr(help, c + 1, 5, "reload", ds);
+      c = writeStr(help, col4, 5, "?", ks);
+      _ = writeStr(help, c + 1, 5, "close help", ds);
     }
   }
 
@@ -554,11 +661,96 @@ pub const Viewer = struct {
       try self.search.query.append(alloc, @intCast(key.codepoint));
   }
 
+  pub fn handleYankKey(self: *Viewer, key: Key) Action {
+    if (key.matches(Key.escape, .{}) or key.codepoint == Key.escape) {
+      self.exitYankMode();
+      return .none;
+    }
+    if (key.matches(Key.enter, .{})) {
+      if (self.yank_ready) {
+        self.copyYankTarget();
+        self.exitYankMode();
+        return .copy_line;
+      }
+      const num = std.fmt.parseInt(usize, self.yank_input[0..self.yank_input_len], 10) catch 0;
+      if (num > 0 and num <= self.lines.len) {
+        self.yank_target = num - 1;
+        self.scrollToLine(num - 1);
+        self.yank_ready = true;
+      }
+      return .none;
+    }
+    if (key.matches(Key.backspace, .{})) {
+      if (self.yank_input_len > 0) {
+        self.yank_input_len -= 1;
+        self.yank_ready = false;
+        self.yank_target = null;
+      }
+      return .none;
+    }
+    if (key.codepoint >= '0' and key.codepoint <= '9') {
+      if (self.yank_input_len < self.yank_input.len) {
+        self.yank_input[self.yank_input_len] = @intCast(key.codepoint);
+        self.yank_input_len += 1;
+        self.yank_ready = false;
+        self.yank_target = null;
+      }
+      return .none;
+    }
+    return .none;
+  }
+
+  fn exitYankMode(self: *Viewer) void {
+    self.yank_active = false;
+    self.yank_ready = false;
+    self.yank_target = null;
+    self.yank_input_len = 0;
+    if (self.yank_restore_lines) {
+      self.show_lines = false;
+      self.yank_restore_lines = false;
+    }
+    self.wrap.width = 0;
+  }
+
+  fn scrollToLine(self: *Viewer, line_idx: usize) void {
+    const vrow = self.wrap.logicalToVisual(line_idx);
+    const ch = self.contentHeight();
+    self.scroll = if (vrow > ch / 2) vrow - ch / 2 else 0;
+    self.clampScroll();
+  }
+
+  fn copyYankTarget(self: *Viewer) void {
+    const idx = self.yank_target orelse return;
+    if (idx >= self.lines.len) return;
+    const line = self.lines[idx];
+    const cmd: []const []const u8 = switch (@import("builtin").os.tag) {
+      .macos => &.{"pbcopy"},
+      .windows => &.{ "cmd", "/c", "clip" },
+      else => &.{"xclip", "-selection", "clipboard"},
+    };
+    var child = std.process.Child.init(cmd, self.alloc);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawn() catch return;
+    if (child.stdin) |stdin| {
+      stdin.writeAll(line.raw) catch {};
+      stdin.close();
+      child.stdin = null;
+    }
+    _ = child.wait() catch {};
+    self.showToast("Line copied");
+  }
+
   const SearchAction = enum { cancel, submit, delete };
 
   pub const Action = enum {
     none,
     quit,
+    back_to_picker,
+    edit,
+    reload,
+    copy_contents,
     start_search,
     next_match,
     prev_match,
@@ -573,6 +765,10 @@ pub const Viewer = struct {
     toggle_lines,
     toggle_urls,
     toggle_help,
+    next_heading,
+    prev_heading,
+    outline,
+    copy_line,
   };
 
   const Binding = struct { u21, Key.Modifiers, Action };
@@ -585,17 +781,28 @@ pub const Viewer = struct {
     .{ Key.enter,     .{},                .next_match },
     .{ 'N',           .{ .shift = true }, .prev_match },
     .{ 'g',           .{},                .scroll_top },
+    .{ Key.home,      .{},                .scroll_top },
     .{ 'G',           .{ .shift = true }, .scroll_bottom },
+    .{ Key.end,       .{},                .scroll_bottom },
     .{ Key.up,        .{},                .scroll_up },
     .{ 'k',           .{},                .scroll_up },
     .{ Key.down,      .{},                .scroll_down },
     .{ 'j',           .{},                .scroll_down },
     .{ Key.page_up,   .{},                .page_up },
+    .{ 'b',           .{},                .page_up },
     .{ ' ',           .{ .shift = true }, .page_up },
     .{ Key.page_down, .{},               .page_down },
+    .{ 'f',           .{},                .page_down },
     .{ ' ',           .{},                .page_down },
-    .{ 'd',           .{ .ctrl = true },  .half_page_down },
-    .{ 'u',           .{ .ctrl = true },  .half_page_up },
+    .{ 'd',           .{},                .half_page_down },
+    .{ 'u',           .{},                .half_page_up },
+    .{ 'c',           .{},                .copy_contents },
+    .{ 'e',           .{},                .edit },
+    .{ 'r',           .{},                .reload },
+    .{ ']',           .{},                .next_heading },
+    .{ '[',           .{},                .prev_heading },
+    .{ 't',           .{},                .outline },
+    .{ 'y',           .{},                .copy_line },
     .{ 'l',           .{},                .toggle_lines },
     .{ 'U',           .{ .shift = true }, .toggle_urls },
     .{ '?',           .{ .shift = true }, .toggle_help },
@@ -607,7 +814,7 @@ pub const Viewer = struct {
         self.search.clear();
         return .none;
       }
-      return .quit;
+      return if (self.has_picker) .back_to_picker else .quit;
     }
 
     for (key_bindings) |bind| {
@@ -642,7 +849,20 @@ pub const Viewer = struct {
         self.saveMemory();
       },
       .toggle_help => self.show_help = !self.show_help,
-      .quit, .none => {},
+      .copy_contents => self.copyContents(),
+      .copy_line => {
+        self.yank_active = true;
+        self.yank_ready = false;
+        self.yank_target = null;
+        self.yank_input_len = 0;
+        if (!self.show_lines) {
+          self.yank_restore_lines = true;
+          self.wrap.width = 0;
+        }
+      },
+      .next_heading => self.nextHeading(),
+      .prev_heading => self.prevHeading(),
+      .quit, .none, .back_to_picker, .edit, .reload, .outline => {},
     }
   }
 
@@ -652,6 +872,58 @@ pub const Viewer = struct {
       .show_urls = self.show_urls,
     };
     m.save(self.alloc);
+  }
+
+  fn copyContents(self: *Viewer) void {
+    var raw_parts: std.ArrayListUnmanaged(u8) = .empty;
+    defer raw_parts.deinit(self.alloc);
+    for (self.lines) |line| {
+      raw_parts.appendSlice(self.alloc, line.raw) catch return;
+      raw_parts.append(self.alloc, '\n') catch return;
+    }
+    const cmd: []const []const u8 = switch (@import("builtin").os.tag) {
+      .macos => &.{"pbcopy"},
+      .windows => &.{ "cmd", "/c", "clip" },
+      else => &.{"xclip", "-selection", "clipboard"},
+    };
+    var child = std.process.Child.init(cmd, self.alloc);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawn() catch return;
+    if (child.stdin) |stdin| {
+      stdin.writeAll(raw_parts.items) catch {};
+      stdin.close();
+      child.stdin = null;
+    }
+    _ = child.wait() catch {};
+    self.showToast("Copied to clipboard");
+  }
+
+  fn drawToast(self: *Viewer, win: vaxis.Window) void {
+    const start = self.toast_time orelse return;
+    const msg = self.toast_msg orelse return;
+    const now = std.time.Instant.now() catch return;
+    const elapsed = now.since(start);
+    if (elapsed > 2 * std.time.ns_per_s) {
+      self.toast_msg = null;
+      self.toast_time = null;
+      return;
+    }
+
+    const len: u16 = @intCast(@min(msg.len + 4, win.width));
+    const x = win.width -| len;
+    const toast = win.child(.{ .x_off = x, .y_off = 0, .width = len, .height = 1 });
+
+    const fade = elapsed > 1_500_000_000;
+    const bg_rgb: [3]u8 = if (fade) .{ 45, 40, 55 } else .{ 55, 45, 70 };
+    const fg_rgb: [3]u8 = if (fade) .{ 140, 130, 160 } else .{ 220, 210, 240 };
+    const icon_rgb: [3]u8 = if (fade) .{ 90, 70, 140 } else .{ 130, 90, 220 };
+    const style: vaxis.Style = .{ .bg = .{ .rgb = bg_rgb }, .fg = .{ .rgb = fg_rgb } };
+
+    toast.fill(.{ .style = style });
+    const col = writeStr(toast, 1, 0, "✓", .{ .bg = .{ .rgb = bg_rgb }, .fg = .{ .rgb = icon_rgb }, .bold = true });
+    _ = writeStr(toast, col + 1, 0, msg, style);
   }
 
   fn isExternalUrl(slug: Bytes) bool {

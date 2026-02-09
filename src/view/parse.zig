@@ -252,8 +252,8 @@ fn processLine(
   }
 
   return .{
-    .raw = raw.items,
-    .segments = segments.items,
+    .raw = try raw.toOwnedSlice(alloc),
+    .segments = try segments.toOwnedSlice(alloc),
     .no_wrap = no_wrap,
   };
 }
@@ -282,8 +282,8 @@ pub fn parseAnsiLines(alloc: std.mem.Allocator, input: Bytes) !ParseResult {
   }
 
   return .{
-    .lines = lines.items,
-    .headings = headings.items,
-    .links = links.items,
+    .lines = try lines.toOwnedSlice(alloc),
+    .headings = try headings.toOwnedSlice(alloc),
+    .links = try links.toOwnedSlice(alloc),
   };
 }

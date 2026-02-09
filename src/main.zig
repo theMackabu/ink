@@ -46,22 +46,45 @@ pub fn main() !void {
       std.process.exit(1);
     }
     
-    const picked = ink.tui.picker.run(allocator) catch |err| {
-      ctx.printf("error: file picker failed: {s}\n", .{@errorName(err)});
+    const tui = ink.tui.Tui.init(allocator) catch |err| {
+      ctx.printf("error: tui init failed: {s}\n", .{@errorName(err)});
       std.process.exit(1);
     };
+    defer tui.deinit();
     
-    if (picked) |result| {
+    while (true) {
+      const picked = ink.tui.picker.run(tui) catch |err| {
+        ctx.printf("error: file picker failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+      };
+      const result = picked orelse return;
       defer allocator.free(result.path);
+
       switch (result.action) {
-        .view => try launchTui(allocator, result.path, watching),
-        .edit => launchEditor(result.path, ctx),
+        .edit => {
+          tui.suspendForEditor();
+          launchEditor(result.path, ctx);
+          tui.resumeFromEditor();
+        },
+        .view => if (try viewLoop(tui, .{
+          .path = result.path,
+          .watching = watching,
+          .has_picker = true,
+        }, ctx)) return,
       }
     }
-    return;
   };
   
-  if (res.args.view != 0) return try launchTui(allocator, path, watching);
+  if (res.args.view != 0) {
+    const tui = try ink.tui.Tui.init(allocator);
+    defer tui.deinit();
+    _ = try viewLoop(tui, .{
+      .path = path,
+      .watching = watching,
+      .has_picker = false,
+    }, ctx);
+    return;
+  }
 
   if (res.args.json != 0) {
     var arena = ink.Arena.init(std.heap.page_allocator);
@@ -87,14 +110,33 @@ pub fn main() !void {
   else try renderNormal(allocator, path, ctx, timing, mem);
 }
 
-fn launchTui(allocator: std.mem.Allocator, path: []const u8, watching: bool) !void {
-  const mem = Memory.load(allocator);
+const TuiOptions = struct {
+  path: []const u8,
+  watching: bool,
+  has_picker: bool,
+};
+
+fn viewLoop(tui: *ink.tui.Tui, opts: TuiOptions, ctx: cli.Ctx) !bool {
+  while (true) {
+    switch (try launchTui(tui, opts)) {
+      .quit => return true,
+      .back_to_picker => return false,
+      .edit => launchEditor(opts.path, ctx),
+    }
+  }
+}
+
+const LaunchResult = enum { quit, back_to_picker, edit };
+
+fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {
+  const alloc = tui.alloc;
+  const mem = Memory.load(alloc);
 
   var arena = ink.Arena.init(std.heap.page_allocator);
   defer arena.deinit();
 
-  const ctx = cli.Ctx.init(allocator);
-  const markdown = readFile(&arena, path, ctx) orelse return;
+  const ctx = cli.Ctx.init(alloc);
+  const markdown = readFile(&arena, opts.path, ctx) orelse return .quit;
   const root = try ink.parse(&arena, markdown);
 
   var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
@@ -109,7 +151,14 @@ fn launchTui(allocator: std.mem.Allocator, path: []const u8, watching: bool) !vo
 
   try aw.writer.flush();
   const rendered = aw.writer.buffer[0..aw.writer.end];
-  try ink.tui.run(allocator, rendered, path, watching);
+  return switch (try ink.tui.run(tui, rendered, opts.path, .{
+    .watching = opts.watching,
+    .has_picker = opts.has_picker,
+  })) {
+    .quit => .quit,
+    .back_to_picker => .back_to_picker,
+    .edit => .edit,
+  };
 }
 
 fn launchEditor(path: []const u8, ctx: cli.Ctx) void {

@@ -21,6 +21,8 @@ const WrapLayout = wrap.WrapLayout;
 const Viewer = viewer.Viewer;
 const Memory = memory.Memory;
 
+pub const RunResult = enum { quit, back_to_picker, edit };
+
 fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool) !struct { rendered: Bytes, arena: *node.Arena } {
   var arena = try alloc.create(node.Arena);
   arena.* = node.Arena.init(std.heap.page_allocator);
@@ -47,7 +49,7 @@ fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool) !struct
   return .{ .rendered = rendered, .arena = arena };
 }
 
-fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_rendered: *?[]const u8, prev_arena: *?*node.Arena) void {
+fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_rendered: *?[]const u8, prev_arena: *?*node.Arena, prev_parsed: *types.ParseResult) void {
   const result = reloadContent(alloc, filename, v.show_urls) catch return;
   const new_parsed = parse.parseAnsiLines(alloc, result.rendered) catch {
     alloc.free(result.rendered);
@@ -56,11 +58,14 @@ fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_re
     return;
   };
 
+  prev_parsed.deinit(alloc);
+
   if (prev_rendered.*) |r| alloc.free(r);
   if (prev_arena.*) |a| { a.deinit(); alloc.destroy(a); }
   prev_rendered.* = result.rendered;
   prev_arena.* = result.arena;
 
+  prev_parsed.* = new_parsed;
   const old_scroll = v.scroll;
   v.lines = new_parsed.lines;
   v.headings = new_parsed.headings;
@@ -71,8 +76,72 @@ fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_re
   v.clampScroll();
 }
 
-pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching: bool) !void {
-  const parsed = try parse.parseAnsiLines(alloc, rendered);
+fn scheduleToastDismiss(loop: *vaxis.Loop(Event)) void {
+  std.Thread.sleep(2 * std.time.ns_per_s);
+  loop.postEvent(.toast_dismiss);
+}
+
+pub const Options = struct {
+  watching: bool = false,
+  has_picker: bool = false,
+};
+
+pub const Tui = struct {
+  alloc: std.mem.Allocator,
+  tty: vaxis.Tty,
+  vx: vaxis.Vaxis,
+  loop: vaxis.Loop(Event),
+  buffer: [1024]u8 = undefined,
+
+  pub fn init(alloc: std.mem.Allocator) !*Tui {
+    const self = try alloc.create(Tui);
+    self.* = .{
+      .alloc = alloc,
+      .tty = undefined,
+      .vx = try vaxis.init(alloc, .{}),
+      .loop = undefined,
+    };
+    self.tty = try vaxis.Tty.init(&self.buffer);
+    self.loop = .{ .tty = &self.tty, .vaxis = &self.vx };
+    try self.loop.init();
+    try self.loop.start();
+    try self.vx.enterAltScreen(self.tty.writer());
+    try self.vx.queryTerminal(self.tty.writer(), 1 * std.time.ns_per_s);
+    try self.vx.setMouseMode(self.tty.writer(), true);
+
+    while (self.loop.tryEvent()) |event| {
+      switch (event) {
+        .winsize => |ws| try self.vx.resize(alloc, self.tty.writer(), ws),
+        else => {},
+      }
+    }
+
+    return self;
+  }
+
+  pub fn suspendForEditor(self: *Tui) void {
+    self.vx.setMouseMode(self.tty.writer(), false) catch {};
+    self.vx.exitAltScreen(self.tty.writer()) catch {};
+  }
+
+  pub fn resumeFromEditor(self: *Tui) void {
+    self.vx.enterAltScreen(self.tty.writer()) catch {};
+    self.vx.setMouseMode(self.tty.writer(), true) catch {};
+  }
+
+  pub fn deinit(self: *Tui) void {
+    self.vx.setMouseMode(self.tty.writer(), false) catch {};
+    self.vx.exitAltScreen(self.tty.writer()) catch {};
+    self.loop.stop();
+    self.vx.deinit(self.alloc, self.tty.writer());
+    self.tty.deinit();
+    self.alloc.destroy(self);
+  }
+};
+
+pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResult {
+  const alloc = tui.alloc;
+  var parsed = try parse.parseAnsiLines(alloc, rendered);
   const mem = Memory.load(alloc);
 
   var v: Viewer = .{
@@ -85,28 +154,18 @@ pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching:
     .show_lines = mem.show_lines,
     .show_urls = mem.show_urls,
     .line_wrap_percent = mem.line_wrap_percent,
+    .has_picker = opts.has_picker,
     .search = SearchState.init(alloc),
     .wrap = WrapLayout.init(alloc),
   };
   
   defer v.search.deinit();
   defer v.wrap.deinit();
-
-  var buffer: [1024]u8 = undefined;
-  var tty = try vaxis.Tty.init(&buffer);
-  defer tty.deinit();
-
-  var vx = try vaxis.init(alloc, .{});
-  defer vx.deinit(alloc, tty.writer());
-
-  var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
-  try loop.init();
-  try loop.start();
-  defer loop.stop();
+  defer parsed.deinit(alloc);
 
   var watcher: ?watch.Watcher = null;
-  if (watching) {
-    watcher = try watch.Watcher.init(filename, &loop);
+  if (opts.watching) {
+    watcher = try watch.Watcher.init(filename, &tui.loop);
     _ = try std.Thread.spawn(.{}, watch.Watcher.run, .{&watcher.?});
   }
 
@@ -117,39 +176,59 @@ pub fn run(alloc: std.mem.Allocator, rendered: Bytes, filename: Bytes, watching:
     if (prev_arena) |a| { a.deinit(); alloc.destroy(a); }
   }
 
-  try vx.enterAltScreen(tty.writer());
-  try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
-  try vx.setMouseMode(tty.writer(), true);
+  {
+    const win = tui.vx.window();
+    v.term_w = win.width;
+    v.term_h = win.height;
+    try v.rebuildWrap(win);
+    v.draw(win);
+    try tui.vx.render(tui.tty.writer());
+  }
 
   while (true) {
-    const event = loop.nextEvent();
+    const event = tui.loop.nextEvent();
     switch (event) {
       .file_changed => {
-        refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena);
+        refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
       },
       .key_press => |key| {
-        if (v.search.active) {
+        if (v.yank_active) {
+          const action = v.handleYankKey(key);
+          if (action == .copy_line) {
+            _ = std.Thread.spawn(.{}, scheduleToastDismiss, .{&tui.loop}) catch {};
+          }
+        } else if (v.search.active) {
           try v.handleSearchKey(alloc, key);
         } else {
           const action = v.handleKeyPress(key);
-          if (action == .quit) break;
-          if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena);
+          if (action == .quit) return .quit;
+          if (action == .back_to_picker) return .back_to_picker;
+          if (action == .edit) return .edit;
+          if (action == .reload) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+          if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+          if (action == .copy_contents) {
+            _ = std.Thread.spawn(.{}, scheduleToastDismiss, .{&tui.loop}) catch {};
+          }
         }
       },
       .mouse => |mouse| v.handleMouse(mouse),
+      .toast_dismiss => {
+        v.toast_msg = null;
+        v.toast_time = null;
+      },
       .winsize => |ws| {
-        try vx.resize(alloc, tty.writer(), ws);
+        try tui.vx.resize(alloc, tui.tty.writer(), ws);
         v.term_w = ws.cols;
         v.term_h = ws.rows;
       },
       else => {},
     }
 
-    const win = vx.window();
+    const win = tui.vx.window();
     v.term_w = win.width;
     v.term_h = win.height;
     try v.rebuildWrap(win);
     v.draw(win);
-    try vx.render(tty.writer());
+    try tui.vx.render(tui.tty.writer());
   }
 }
