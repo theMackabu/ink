@@ -51,46 +51,37 @@ pub const WrapLayout = struct {
       var last_space_col: u16 = 0;
       var has_space = false;
 
-      for (line.segments, 0..) |seg, si| {
-        const in_code = seg.style.bg != .default;
-        var giter = vaxis.unicode.graphemeIterator(seg.text);
-        var seg_pos: u32 = 0;
+      var giter = line.graphemeIterator(.{ .seg_idx = 0, .byte_off = 0 }, null);
+      while (giter.next()) |entry| {
+        const gw: u16 = win.gwidth(entry.grapheme);
+        if (gw == 0) continue;
 
-        while (giter.next()) |g| {
-          const grapheme = g.bytes(seg.text);
-          const gw: u16 = win.gwidth(grapheme);
-          if (gw == 0) {
-            seg_pos += @intCast(grapheme.len);
-            continue;
-          }
-
-          if (grapheme.len == 1 and grapheme[0] == ' ' and !in_code) {
-            last_space_seg = @intCast(si);
-            last_space_off = seg_pos + @as(u32, @intCast(grapheme.len));
-            last_space_col = row_col + gw;
-            has_space = true;
-          }
-
-          if (row_col > 0 and row_col + gw > content_w) {
-            if (has_space) {
-              try self.points.append(self.alloc, .{
-                .seg_idx = last_space_seg,
-                .byte_off = last_space_off,
-              });
-              row_col -|= last_space_col;
-            } else {
-              try self.points.append(self.alloc, .{
-                .seg_idx = @intCast(si),
-                .byte_off = seg_pos,
-              });
-              row_col = 0;
-            }
-            has_space = false;
-          }
-
-          row_col +|= gw;
-          seg_pos += @intCast(grapheme.len);
+        const in_code = entry.style.bg != .default;
+        if (entry.grapheme.len == 1 and entry.grapheme[0] == ' ' and !in_code) {
+          last_space_seg = entry.seg_idx;
+          last_space_off = entry.seg_off + @as(u32, @intCast(entry.grapheme.len));
+          last_space_col = row_col + gw;
+          has_space = true;
         }
+
+        if (row_col > 0 and row_col + gw > content_w) {
+          if (has_space) {
+            try self.points.append(self.alloc, .{
+              .seg_idx = last_space_seg,
+              .byte_off = last_space_off,
+            });
+            row_col -|= last_space_col;
+          } else {
+            try self.points.append(self.alloc, .{
+              .seg_idx = entry.seg_idx,
+              .byte_off = entry.seg_off,
+            });
+            row_col = 0;
+          }
+          has_space = false;
+        }
+
+        row_col +|= gw;
       }
 
       const count: u32 = @intCast(self.points.items.len - off);

@@ -306,62 +306,34 @@ pub const Viewer = struct {
     const query = self.search.query.items;
     const raw = line.raw;
 
-    var seg_i: u32 = start.seg_idx;
-    var raw_byte: u32 = 0;
-    {
-      var si: u32 = 0;
-      while (si < start.seg_idx) : (si += 1) {
-        raw_byte += @intCast(line.segments[si].text.len);
-      }
-      raw_byte += start.byte_off;
-    }
+    var giter = line.graphemeIterator(start, end);
+    while (giter.next()) |entry| {
+      if (col >= max_col) return;
 
-    while (seg_i < line.segments.len) : (seg_i += 1) {
-      const seg = &line.segments[seg_i];
-      const base_style = seg.style;
+      const w = win.gwidth(entry.grapheme);
+      if (w == 0) continue;
 
-      const byte_start: u32 = if (seg_i == start.seg_idx) start.byte_off else 0;
-      const text = seg.text[byte_start..];
-
-      var giter = vaxis.unicode.graphemeIterator(text);
-      while (giter.next()) |g| {
-        if (end) |e| {
-          const abs_pos = byte_start + @as(u32, @intCast(g.start));
-          if (seg_i > e.seg_idx or (seg_i == e.seg_idx and abs_pos >= e.byte_off))
-            return;
-        }
-        if (col >= max_col) return;
-
-        const grapheme = g.bytes(text);
-        const w = win.gwidth(grapheme);
-        if (w == 0) {
-          raw_byte += @intCast(grapheme.len);
-          continue;
-        }
-
-        var style = base_style;
-        if ((is_match or is_current) and query.len > 0 and raw_byte < raw.len) {
-          if (isInQueryMatch(raw, query, raw_byte)) {
-            if (is_current) {
-              style.bg = .{ .rgb = .{ 200, 170, 0 } };
-              style.fg = .{ .rgb = .{ 0, 0, 0 } };
-            } else {
-              const base_rgb = switch (base_style.bg) {
-                .rgb => |rgb| rgb,
-                else => [3]u8{ 20, 20, 30 },
-              };
-              style.bg = .{ .rgb = blend(base_rgb, .{ 160, 160, 180 }, 0.35) };
-            }
+      var style = entry.style;
+      if ((is_match or is_current) and query.len > 0 and entry.raw_byte < raw.len) {
+        if (isInQueryMatch(raw, query, entry.raw_byte)) {
+          if (is_current) {
+            style.bg = .{ .rgb = .{ 200, 170, 0 } };
+            style.fg = .{ .rgb = .{ 0, 0, 0 } };
+          } else {
+            const base_rgb = switch (entry.style.bg) {
+              .rgb => |rgb| rgb,
+              else => [3]u8{ 20, 20, 30 },
+            };
+            style.bg = .{ .rgb = blend(base_rgb, .{ 160, 160, 180 }, 0.35) };
           }
         }
-
-        win.writeCell(col, row, .{
-          .char = .{ .grapheme = grapheme, .width = @intCast(w) },
-          .style = style,
-        });
-        col +|= w;
-        raw_byte += @intCast(grapheme.len);
       }
+
+      win.writeCell(col, row, .{
+        .char = .{ .grapheme = entry.grapheme, .width = @intCast(w) },
+        .style = style,
+      });
+      col +|= w;
     }
   }
 
