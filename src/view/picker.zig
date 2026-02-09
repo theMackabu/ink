@@ -27,81 +27,223 @@ pub const PickerResult = struct {
   action: Action,
 };
 
+const max_file_count = 500_000;
+const max_scan_depth = 8;
+
+const ScanState = struct {
+  mutex: std.Thread.Mutex = .{},
+  files: std.ArrayListUnmanaged(FileEntry) = .empty,
+  scanned: usize = 0,
+  done: bool = false,
+  alloc: std.mem.Allocator,
+  loop: *vaxis.Loop(Event),
+
+  fn postUpdate(self: *ScanState) void {
+    self.mutex.lock();
+    const count = self.files.items.len;
+    const scanned = self.scanned;
+    const done = self.done;
+    self.mutex.unlock();
+    self.loop.postEvent(.{ .scan_update = .{
+      .done = done,
+      .count = count,
+      .scanned = scanned,
+    } });
+  }
+
+  fn takeFiles(self: *ScanState) std.ArrayListUnmanaged(FileEntry) {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    const result = self.files;
+    self.files = .empty;
+    return result;
+  }
+};
+
+fn scanThread(state: *ScanState) void {
+  walkDir(state.alloc, state, std.fs.cwd(), "", 0) catch {};
+
+  state.mutex.lock();
+  state.done = true;
+  state.mutex.unlock();
+  state.postUpdate();
+}
+
+fn reachedLimit(state: *ScanState) bool {
+  state.mutex.lock();
+  defer state.mutex.unlock();
+  return state.scanned >= max_file_count;
+}
+
+fn bumpScanned(state: *ScanState) void {
+  state.mutex.lock();
+  defer state.mutex.unlock();
+  state.scanned += 1;
+}
+
+fn isMarkdown(name: []const u8) bool {
+  return std.mem.endsWith(u8, name, ".md") or std.mem.endsWith(u8, name, ".markdown");
+}
+
+fn walkDir(alloc: std.mem.Allocator, state: *ScanState, base: std.fs.Dir, prefix: []const u8, depth: usize) !void {
+  if (depth >= max_scan_depth or reachedLimit(state)) return;
+
+  var dir = base.openDir(if (prefix.len > 0) prefix else ".", .{ .iterate = true }) catch return;
+  defer dir.close();
+
+  var iter = dir.iterate();
+  while (try iter.next()) |entry| {
+    if (reachedLimit(state)) return;
+    if (entry.name.len > 0 and entry.name[0] == '.') continue;
+
+    const rel = if (prefix.len > 0)
+      try std.fmt.allocPrint(alloc, "{s}/{s}", .{ prefix, entry.name })
+    else
+      try alloc.dupe(u8, entry.name);
+
+    bumpScanned(state);
+
+    if (entry.kind == .directory) {
+      defer alloc.free(rel);
+      try walkDir(alloc, state, base, rel, depth + 1);
+      continue;
+    }
+
+    if (entry.kind != .file or !isMarkdown(entry.name)) {
+      alloc.free(rel);
+      continue;
+    }
+
+    const stat = dir.statFile(entry.name) catch {
+      alloc.free(rel);
+      continue;
+    };
+
+    state.mutex.lock();
+    state.files.append(alloc, .{ .path = rel, .mtime = stat.mtime, .size = stat.size }) catch {
+      state.mutex.unlock();
+      alloc.free(rel);
+      continue;
+    };
+    const count = state.files.items.len;
+    state.mutex.unlock();
+
+    if (count <= 50 or count % 25 == 0) state.postUpdate();
+  }
+}
+
 const Picker = struct {
   alloc: std.mem.Allocator,
-  files: []FileEntry,
-  rows: []FileRow,
-  filtered_rows: []FileRow,
-  filter_buf: []FileRow,
+  files: std.ArrayListUnmanaged(FileEntry) = .empty,
+  rows: std.ArrayListUnmanaged(FileRow) = .empty,
+  filtered_rows: std.ArrayListUnmanaged(FileRow) = .empty,
   cursor: usize = 0,
   scroll: usize = 0,
   search_state: search.SearchState,
-  string_allocs: std.ArrayList([]const u8),
+  string_allocs: std.ArrayListUnmanaged([]const u8) = .empty,
   selected: ?[]const u8 = null,
   action: Action = .view,
   show_help: bool = false,
   hovered_idx: ?usize = null,
   term_w: u16 = 0,
   term_h: u16 = 0,
-  count_buf: [48]u8 = undefined,
+  count_buf: [64]u8 = undefined,
   count_len: usize = 0,
+  scanning: bool = true,
+  scan_count: usize = 0,
+  scan_scanned: usize = 0,
+  spinner_frame: u8 = 0,
 
   fn applyFilter(self: *Picker) void {
     const needle = self.search_state.query.items;
+    self.filtered_rows.clearRetainingCapacity();
     if (needle.len == 0) {
-      @memcpy(self.filter_buf[0..self.rows.len], self.rows);
-      self.filtered_rows = self.filter_buf[0..self.rows.len];
+      self.filtered_rows.appendSlice(self.alloc, self.rows.items) catch {};
     } else {
-      var count: usize = 0;
-      for (self.rows) |row| {
+      for (self.rows.items) |row| {
         if (search.containsIgnoreCase(row.path, needle)) {
-          self.filter_buf[count] = row;
-          count += 1;
+          self.filtered_rows.append(self.alloc, row) catch {};
         }
       }
-      self.filtered_rows = self.filter_buf[0..count];
     }
     self.cursor = 0;
     self.scroll = 0;
     self.updateCount();
   }
 
-  fn refresh(self: *Picker) !void {
-    for (self.string_allocs.items) |s| self.alloc.free(s);
-    self.string_allocs.clearRetainingCapacity();
-    for (self.files) |f| self.alloc.free(f.path);
-    self.alloc.free(self.files);
-    self.alloc.free(self.rows);
-    self.alloc.free(self.filter_buf);
-
-    const files = try collectMarkdownFiles(self.alloc);
-    const rows = try self.alloc.alloc(FileRow, files.len);
-    const filtered = try self.alloc.alloc(FileRow, files.len);
-
-    for (files, 0..) |f, i| {
+  fn ingestFiles(self: *Picker, new_files: []const FileEntry) !void {
+    for (new_files) |f| {
+      try self.files.append(self.alloc, f);
       const time_str = try formatTime(self.alloc, f.mtime);
       try self.string_allocs.append(self.alloc, time_str);
       const size_str = try formatSize(self.alloc, f.size);
       try self.string_allocs.append(self.alloc, size_str);
-      rows[i] = .{
+      const row: FileRow = .{
         .path = f.path,
         .time_str = time_str,
         .size_str = size_str,
       };
+      try self.rows.append(self.alloc, row);
+    }
+    self.sortRows();
+    self.applyFilter();
+  }
+
+  fn sortRows(self: *Picker) void {
+    const SortCtx = struct {
+      files: []const FileEntry,
+      fn cmp(ctx: @This(), a_idx: usize, b_idx: usize) bool {
+        return ctx.files[a_idx].mtime > ctx.files[b_idx].mtime;
+      }
+    };
+
+    const n = self.rows.items.len;
+    if (n <= 1) return;
+
+    const indices = self.alloc.alloc(usize, n) catch return;
+    defer self.alloc.free(indices);
+    for (indices, 0..) |*idx, i| idx.* = i;
+
+    std.mem.sort(usize, indices, SortCtx{ .files = self.files.items }, SortCtx.cmp);
+
+    var sorted_rows = self.alloc.alloc(FileRow, n) catch return;
+    defer self.alloc.free(sorted_rows);
+    var sorted_files = self.alloc.alloc(FileEntry, n) catch return;
+    defer self.alloc.free(sorted_files);
+
+    for (indices, 0..) |src, dst| {
+      sorted_rows[dst] = self.rows.items[src];
+      sorted_files[dst] = self.files.items[src];
     }
 
-    self.files = files;
-    self.rows = rows;
-    self.filter_buf = filtered;
+    @memcpy(self.rows.items[0..n], sorted_rows[0..n]);
+    @memcpy(self.files.items[0..n], sorted_files[0..n]);
+  }
+
+  fn refresh(self: *Picker, loop: *vaxis.Loop(Event)) void {
+    for (self.string_allocs.items) |s| self.alloc.free(s);
+    self.string_allocs.clearRetainingCapacity();
+    for (self.files.items) |f| self.alloc.free(f.path);
+    self.files.clearRetainingCapacity();
+    self.rows.clearRetainingCapacity();
+    self.filtered_rows.clearRetainingCapacity();
     self.search_state.clear();
-    self.applyFilter();
+    self.scanning = true;
+    self.scan_count = 0;
+    self.scan_scanned = 0;
+    self.spinner_frame = 0;
+    self.updateCount();
+
+    const state = self.alloc.create(ScanState) catch return;
+    state.* = .{ .alloc = self.alloc, .loop = loop };
+    _ = std.Thread.spawn(.{}, scanThread, .{state}) catch return;
   }
 
   fn listHeight(self: *Picker) usize {
     const footer_h: u16 = if (!self.show_help) 1
       else if (self.search_state.active) 3
       else 4;
-    return self.term_h -| (2 + footer_h + 1);
+    return self.term_h -| (2 + footer_h + 1 + @as(u16, if (self.scanning) 2 else 0));
   }
 
   fn ensureScroll(self: *Picker) void {
@@ -153,14 +295,14 @@ const Picker = struct {
 
     if (key.matches('q', .{})) return .quit;
     if (key.matches(vaxis.Key.enter, .{})) {
-      if (self.cursor < self.filtered_rows.len) {
-        self.selected = self.filtered_rows[self.cursor].path;
+      if (self.cursor < self.filtered_rows.items.len) {
+        self.selected = self.filtered_rows.items[self.cursor].path;
       }
       return .done;
     }
     if (key.matches('e', .{})) {
-      if (self.cursor < self.filtered_rows.len) {
-        self.selected = self.filtered_rows[self.cursor].path;
+      if (self.cursor < self.filtered_rows.items.len) {
+        self.selected = self.filtered_rows.items[self.cursor].path;
         self.action = .edit;
       }
       return .done;
@@ -170,7 +312,6 @@ const Picker = struct {
       return .none;
     }
     if (key.matches('r', .{})) {
-      self.refresh() catch {};
       return .none;
     }
     if (key.matches('/', .{})) {
@@ -183,8 +324,8 @@ const Picker = struct {
       return .none;
     }
     if (key.matches('G', .{ .shift = true })) {
-      if (self.filtered_rows.len > 0) {
-        self.cursor = self.filtered_rows.len - 1;
+      if (self.filtered_rows.items.len > 0) {
+        self.cursor = self.filtered_rows.items.len - 1;
         self.ensureScroll();
       }
       return .none;
@@ -216,7 +357,7 @@ const Picker = struct {
     if (mouse.type == .press and mouse.button == .left) {
       if (row_idx) |idx| {
         self.cursor = idx;
-        self.selected = self.filtered_rows[idx].path;
+        self.selected = self.filtered_rows.items[idx].path;
         return .done;
       }
     }
@@ -224,8 +365,8 @@ const Picker = struct {
   }
 
   fn moveCursor(self: *Picker, delta: i32) void {
-    if (self.filtered_rows.len == 0) return;
-    const max: i32 = @intCast(self.filtered_rows.len - 1);
+    if (self.filtered_rows.items.len == 0) return;
+    const max: i32 = @intCast(self.filtered_rows.items.len - 1);
     const cur: i32 = @intCast(self.cursor);
     self.cursor = @intCast(std.math.clamp(cur + delta, 0, max));
     self.ensureScroll();
@@ -235,7 +376,7 @@ const Picker = struct {
     if (mouse_row < 2) return null;
     const row: usize = @intCast(mouse_row - 2);
     const actual = self.scroll + row;
-    if (actual >= self.filtered_rows.len) return null;
+    if (actual >= self.filtered_rows.items.len) return null;
     return actual;
   }
 
@@ -243,22 +384,30 @@ const Picker = struct {
     win.clear();
     self.drawHeader(win);
     self.drawList(win);
+    if (self.scanning) self.drawProgress(win);
     self.drawFooter(win);
   }
 
   fn updateCount(self: *Picker) void {
-    const result = if (self.search_state.query.items.len > 0)
-      std.fmt.bufPrint(&self.count_buf, " {d}/{d} document{s}", .{
-        self.filtered_rows.len,
-        self.rows.len,
-        @as([]const u8, if (self.rows.len != 1) "s" else ""),
-      })
-    else
-      std.fmt.bufPrint(&self.count_buf, " {d} document{s}", .{
-        self.rows.len,
-        @as([]const u8, if (self.rows.len != 1) "s" else ""),
+    if (self.scanning) {
+      const result = std.fmt.bufPrint(&self.count_buf, " scanning… {d} found", .{
+        self.rows.items.len,
       });
-    self.count_len = if (result) |s| s.len else |_| 0;
+      self.count_len = if (result) |s| s.len else |_| 0;
+    } else if (self.search_state.query.items.len > 0) {
+      const result = std.fmt.bufPrint(&self.count_buf, " {d}/{d} document{s}", .{
+        self.filtered_rows.items.len,
+        self.rows.items.len,
+        @as([]const u8, if (self.rows.items.len != 1) "s" else ""),
+      });
+      self.count_len = if (result) |s| s.len else |_| 0;
+    } else {
+      const result = std.fmt.bufPrint(&self.count_buf, " {d} document{s}", .{
+        self.rows.items.len,
+        @as([]const u8, if (self.rows.items.len != 1) "s" else ""),
+      });
+      self.count_len = if (result) |s| s.len else |_| 0;
+    }
   }
 
   fn drawHeader(self: *Picker, win: vaxis.Window) void {
@@ -303,8 +452,13 @@ const Picker = struct {
     const h = self.listHeight();
     const list = win.child(.{ .y_off = 2, .height = @intCast(h) });
 
-    if (self.filtered_rows.len == 0) {
-      const msg = if (self.search_state.query.items.len > 0) "No matches found." else "No files found.";
+    if (self.filtered_rows.items.len == 0) {
+      const msg = if (self.scanning)
+        "Scanning for documents…"
+      else if (self.search_state.query.items.len > 0)
+        "No matches found."
+      else
+        "No files found.";
       _ = writeStr(list, 2, 1, msg, .{ .fg = .{ .rgb = .{ 100, 100, 120 } } });
       return;
     }
@@ -312,8 +466,8 @@ const Picker = struct {
     var row: u16 = 0;
     while (row < h) : (row += 1) {
       const idx = self.scroll + row;
-      if (idx >= self.filtered_rows.len) break;
-      const file_row = self.filtered_rows[idx];
+      if (idx >= self.filtered_rows.items.len) break;
+      const file_row = self.filtered_rows.items[idx];
       const is_selected = idx == self.cursor;
       const is_hovered = if (self.hovered_idx) |hi| (idx == hi and !is_selected) else false;
       self.drawRow(list, row, file_row, is_selected, is_hovered);
@@ -371,6 +525,39 @@ const Picker = struct {
       var mc = writeStr(win, meta_start, row, file_row.size_str, meta_style);
       mc = writeStr(win, mc + 1, row, "·", dot_style);
       _ = writeStr(win, mc + 1, row, file_row.time_str, meta_style);
+    }
+  }
+
+  fn drawProgress(self: *Picker, win: vaxis.Window) void {
+    const footer_h: u16 = if (!self.show_help) 1
+      else if (self.search_state.active) 3
+      else 4;
+    const progress_y = win.height -| (footer_h + 1 + 2);
+
+    const spinners = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+    const spinner = spinners[self.spinner_frame % spinners.len];
+
+    const bar_start: u16 = 4;
+    const bar_end = win.width -| 3;
+    if (bar_end <= bar_start + 4) return;
+    const bar_w = bar_end - bar_start;
+
+    _ = writeStr(win, 2, progress_y, spinner, .{ .fg = .{ .rgb = .{ 130, 90, 220 } } });
+
+    const ratio: f64 = @as(f64, @floatFromInt(@min(self.scan_scanned, max_file_count))) /
+      @as(f64, @floatFromInt(max_file_count));
+    const filled: u16 = @intCast(@min(bar_w, @as(u64, @intFromFloat(ratio * @as(f64, @floatFromInt(bar_w))))));
+
+    var col: u16 = bar_start;
+    var i: u16 = 0;
+    while (i < bar_w) : (i += 1) {
+      const ch: []const u8 = if (i < filled) "━" else "─";
+      const fg: vaxis.Cell.Color = if (i < filled) .{ .rgb = .{ 130, 90, 220 } } else .{ .rgb = .{ 40, 40, 55 } };
+      win.writeCell(col, progress_y, .{
+        .char = .{ .grapheme = ch, .width = 1 },
+        .style = .{ .fg = fg },
+      });
+      col += 1;
     }
   }
 
@@ -479,7 +666,8 @@ pub fn collectMarkdownFiles(alloc: std.mem.Allocator) ![]FileEntry {
     files.deinit(alloc);
   }
 
-  try walkDir(alloc, &files, std.fs.cwd(), "");
+  var scanned: usize = 0;
+  walkDirSync(alloc, &files, std.fs.cwd(), "", 0, &scanned) catch {};
   std.mem.sort(FileEntry, files.items, {}, struct {
     fn cmp(_: void, a: FileEntry, b: FileEntry) bool {
       return a.mtime > b.mtime;
@@ -489,12 +677,16 @@ pub fn collectMarkdownFiles(alloc: std.mem.Allocator) ![]FileEntry {
   return try files.toOwnedSlice(alloc);
 }
 
-fn walkDir(alloc: std.mem.Allocator, files: *std.ArrayListUnmanaged(FileEntry), base: std.fs.Dir, prefix: []const u8) !void {
+fn walkDirSync(alloc: std.mem.Allocator, files: *std.ArrayListUnmanaged(FileEntry), base: std.fs.Dir, prefix: []const u8, depth: usize, scanned: *usize) !void {
+  if (depth >= max_scan_depth) return;
+  if (scanned.* >= max_file_count) return;
+
   var dir = base.openDir(if (prefix.len > 0) prefix else ".", .{ .iterate = true }) catch return;
   defer dir.close();
 
   var iter = dir.iterate();
   while (try iter.next()) |entry| {
+    if (scanned.* >= max_file_count) return;
     if (entry.name.len > 0 and entry.name[0] == '.') continue;
 
     const rel = if (prefix.len > 0)
@@ -502,10 +694,12 @@ fn walkDir(alloc: std.mem.Allocator, files: *std.ArrayListUnmanaged(FileEntry), 
     else
       try alloc.dupe(u8, entry.name);
 
+    scanned.* += 1;
+
     switch (entry.kind) {
       .directory => {
         defer alloc.free(rel);
-        try walkDir(alloc, files, base, rel);
+        try walkDirSync(alloc, files, base, rel, depth + 1, scanned);
       },
       .file => {
         if (std.mem.endsWith(u8, entry.name, ".md") or std.mem.endsWith(u8, entry.name, ".markdown")) {
@@ -554,43 +748,25 @@ fn formatSize(alloc: std.mem.Allocator, size: u64) ![]const u8 {
 
 pub fn run(tui: *Tui) !?PickerResult {
   const alloc = tui.alloc;
-  const files = try collectMarkdownFiles(alloc);
-  const rows = try alloc.alloc(FileRow, files.len);
-  const filtered = try alloc.alloc(FileRow, files.len);
 
-  var string_allocs = std.ArrayList([]const u8).empty;
-  for (files, 0..) |f, i| {
-    const time_str = try formatTime(alloc, f.mtime);
-    try string_allocs.append(alloc, time_str);
-    const size_str = try formatSize(alloc, f.size);
-    try string_allocs.append(alloc, size_str);
-    rows[i] = .{
-      .path = f.path,
-      .time_str = time_str,
-      .size_str = size_str,
-    };
-  }
+  var scan_state = try alloc.create(ScanState);
+  scan_state.* = .{ .alloc = alloc, .loop = &tui.loop };
+  _ = try std.Thread.spawn(.{}, scanThread, .{scan_state});
 
   var picker: Picker = .{
     .alloc = alloc,
-    .files = files,
-    .rows = rows,
-    .filtered_rows = filtered[0..rows.len],
-    .filter_buf = filtered,
     .search_state = search.SearchState.init(alloc),
-    .string_allocs = string_allocs,
   };
   defer {
     for (picker.string_allocs.items) |s| alloc.free(s);
     picker.string_allocs.deinit(alloc);
-    for (picker.files) |f| alloc.free(f.path);
-    alloc.free(picker.files);
-    alloc.free(picker.rows);
-    alloc.free(picker.filter_buf);
+    for (picker.files.items) |f| alloc.free(f.path);
+    picker.files.deinit(alloc);
+    picker.rows.deinit(alloc);
+    picker.filtered_rows.deinit(alloc);
     picker.search_state.deinit();
   }
 
-  @memcpy(picker.filtered_rows, rows);
   picker.updateCount();
 
   {
@@ -604,11 +780,35 @@ pub fn run(tui: *Tui) !?PickerResult {
   while (true) {
     const event = tui.loop.nextEvent();
     switch (event) {
+      .scan_update => |update| {
+        picker.scan_count = update.count;
+        picker.scan_scanned = update.scanned;
+        picker.spinner_frame +%= 1;
+
+        var batch = scan_state.takeFiles();
+        defer batch.deinit(alloc);
+
+        if (batch.items.len > 0) {
+          picker.ingestFiles(batch.items) catch {};
+        }
+
+        if (update.done) {
+          picker.scanning = false;
+          picker.updateCount();
+        }
+      },
       .key_press => |key| {
-        switch (picker.handleKeyPress(key)) {
-          .quit => return null,
-          .done => break,
-          .none => {},
+        if (!picker.scanning and key.matches('r', .{})) {
+          picker.refresh(&tui.loop);
+          scan_state = alloc.create(ScanState) catch continue;
+          scan_state.* = .{ .alloc = alloc, .loop = &tui.loop };
+          _ = std.Thread.spawn(.{}, scanThread, .{scan_state}) catch continue;
+        } else {
+          switch (picker.handleKeyPress(key)) {
+            .quit => return null,
+            .done => break,
+            .none => {},
+          }
         }
       },
       .mouse => |mouse| {

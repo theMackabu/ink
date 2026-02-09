@@ -127,7 +127,7 @@ fn viewLoop(tui: *ink.tui.Tui, opts: TuiOptions, ctx: cli.Ctx) !bool {
     .quit => return true,
     .back_to_picker => return false,
     .edit => handleEditor(tui, opts.path, ctx),
-  }
+  };
 }
 
 fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {

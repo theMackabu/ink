@@ -15,6 +15,13 @@ pub const Event = union(enum) {
   focus_out,
   file_changed,
   toast_dismiss,
+  scan_update: ScanUpdate,
+};
+
+pub const ScanUpdate = struct {
+  done: bool,
+  count: usize,
+  scanned: usize,
 };
 
 pub const FragmentLink = struct {
