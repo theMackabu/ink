@@ -1,4 +1,4 @@
-# Zig
+# zig
 .zig-cache/
 zig-out/
 /release/
@@ -6,10 +6,11 @@ zig-out/
 /build/
 /build-*/
 
-# Nix
+# nix
 /result
 /.direnv/
 
-# Misc
+# misc
 /docgen_tmp/
 *.md.json
+*.todo.txt
