@@ -91,6 +91,29 @@ fn isFirstItem(parent: *Node) bool {
   return !isListKind(prev.kind);
 }
 
+fn hasHardBreak(line: Bytes) bool {
+  return line.len >= 2 and line[line.len - 1] == ' ' and line[line.len - 2] == ' ';
+}
+
+fn trimHardBreak(line: Bytes) Bytes {
+  var end = line.len;
+  while (end > 0 and line[end - 1] == ' ') : (end -= 1) {}
+  return line[0..end];
+}
+
+fn parseInlineWithBreak(arena: *Arena, parent: *Node, line: Bytes) !void {
+  const hard_break = hasHardBreak(line);
+  const content = if (hard_break) trimHardBreak(line) else line;
+  var inl = try parseInline(arena, content);
+  while (inl) |n| {
+    const next = n.next;
+    n.next = null;
+    appendChild(parent, n);
+    inl = next;
+  }
+  if (hard_break) appendChild(parent, try newNode(arena, .linebreak));
+}
+
 fn matchBr(input: Bytes, pos: usize) ?usize {
   const tags = [_]Bytes{ "<br>", "<br/>", "<br />" };
   inline for (tags) |tag| {
@@ -374,6 +397,7 @@ fn isBlockStartAt(input: Bytes, pos: usize) bool {
     '0'...'9' => blk: {
       var p = pos;
       while (p < input.len and input[p] >= '0' and input[p] <= '9') : (p += 1) {}
+      if (p < input.len and input[p] >= 'a' and input[p] <= 'z') p += 1;
       break :blk p + 1 < input.len and input[p] == '.' and input[p + 1] == ' ';
     },
     else => false,
@@ -402,35 +426,50 @@ fn parseListItem(arena: *Arena, s: *Scanner, parent: *Node, indent: u8) !void {
   if (tryParseTask(s)) |checked| {
     const line = s.readLine();
     const item = try newNode(arena, .{ .task_item = .{ .indent = indent, .checked = checked, .first = isFirstItem(parent) } });
-    item.children = try parseInline(arena, line);
+    const hard_break = hasHardBreak(line);
+    const content = if (hard_break) trimHardBreak(line) else line;
+    item.children = try parseInline(arena, content);
     appendChild(parent, item);
     s.skipNewline();
-    try appendItemContinuation(arena, item, s);
+    try appendItemContinuation(arena, item, s, indent, hard_break);
   } else {
     const line = s.readLine();
     const item = try newNode(arena, .{ .list_item = .{ .indent = indent, .first = isFirstItem(parent) } });
-    item.children = try parseInline(arena, line);
+    const hard_break = hasHardBreak(line);
+    const content = if (hard_break) trimHardBreak(line) else line;
+    item.children = try parseInline(arena, content);
     appendChild(parent, item);
     s.skipNewline();
-    try appendItemContinuation(arena, item, s);
+    try appendItemContinuation(arena, item, s, indent, hard_break);
   }
 }
 
 fn parseOrderedItem(arena: *Arena, s: *Scanner, parent: *Node, indent: u8) !bool {
   const saved = s.pos;
   const digits = s.readDigits();
-  if (digits.len == 0 or s.pos + 1 >= s.input.len or s.cur() != '.' or s.at(1) != ' ') {
+  if (digits.len == 0) {
+    s.pos = saved;
+    return false;
+  }
+  var suffix: ?u8 = null;
+  if (!s.eof() and s.cur() >= 'a' and s.cur() <= 'z') {
+    suffix = s.cur();
+    s.advance(1);
+  }
+  if (s.pos + 1 >= s.input.len or s.cur() != '.' or s.at(1) != ' ') {
     s.pos = saved;
     return false;
   }
   const number = std.fmt.parseInt(u32, digits, 10) catch 0;
   s.advance(2);
   const line = s.readLine();
-  const item = try newNode(arena, .{ .ordered_item = .{ .indent = indent, .number = number, .first = isFirstItem(parent) } });
-  item.children = try parseInline(arena, line);
+  const item = try newNode(arena, .{ .ordered_item = .{ .indent = indent, .number = number, .suffix = suffix, .first = isFirstItem(parent) } });
+  const hard_break = hasHardBreak(line);
+  const content = if (hard_break) trimHardBreak(line) else line;
+  item.children = try parseInline(arena, content);
   appendChild(parent, item);
   s.skipNewline();
-  try appendItemContinuation(arena, item, s);
+  try appendItemContinuation(arena, item, s, indent, hard_break);
   return true;
 }
 
@@ -438,7 +477,10 @@ fn parseParagraphLine(arena: *Arena, s: *Scanner, parent: *Node) !void {
   const line = s.readLine();
   if (line.len > 0) {
     const para = try newNode(arena, .paragraph);
-    para.children = try parseInline(arena, line);
+    const hard_break = hasHardBreak(line);
+    const content = if (hard_break) trimHardBreak(line) else line;
+    para.children = try parseInline(arena, content);
+    if (hard_break) appendChild(para, try newNode(arena, .linebreak));
     appendChild(parent, para);
   }
   s.skipNewline();
@@ -453,8 +495,16 @@ fn isIndentedContinuation(input: Bytes, pos: usize) bool {
   return !isBlockStartAt(input, after);
 }
 
-fn appendItemContinuation(arena: *Arena, item: *Node, s: *Scanner) !void {
+fn appendItemContinuation(arena: *Arena, item: *Node, s: *Scanner, indent: u8, pending_break: bool) error{OutOfMemory}!void {
+  var has_break = pending_break;
+  while (try parseIndentedItem(arena, s, item, indent)) {
+    has_break = false;
+  }
   while (isIndentedContinuation(s.input, s.pos)) {
+    if (has_break) {
+      appendChild(item, try newNode(arena, .linebreak));
+      has_break = false;
+    }
     _ = s.skipSpaces();
     const cont = s.readLine();
     if (cont.len == 0) break;
@@ -466,13 +516,16 @@ fn appendItemContinuation(arena: *Arena, item: *Node, s: *Scanner) !void {
     };
     if (tail.kind != .linebreak) appendChild(item, try newNode(arena, .{ .text = " " }));
 
-    var inl = try parseInline(arena, cont);
+    const hard_break = hasHardBreak(cont);
+    const content = if (hard_break) trimHardBreak(cont) else cont;
+    var inl = try parseInline(arena, content);
     while (inl) |n| {
       const next = n.next;
       n.next = null;
       appendChild(item, n);
       inl = next;
     }
+    if (hard_break) appendChild(item, try newNode(arena, .linebreak));
     s.skipNewline();
   }
 }
@@ -489,13 +542,16 @@ fn appendContinuation(arena: *Arena, para: *Node, s: *Scanner) !void {
     };
     if (tail.kind != .linebreak) appendChild(para, try newNode(arena, .{ .text = " " }));
 
-    var inl = try parseInline(arena, cont);
+    const hard_break = hasHardBreak(cont);
+    const content = if (hard_break) trimHardBreak(cont) else cont;
+    var inl = try parseInline(arena, content);
     while (inl) |n| {
       const next = n.next;
       n.next = null;
       appendChild(para, n);
       inl = next;
     }
+    if (hard_break) appendChild(para, try newNode(arena, .linebreak));
     s.skipNewline();
   }
 }
@@ -641,10 +697,10 @@ fn parseCodeBlock(arena: *Arena, s: *Scanner, root: *Node) !void {
   appendChild(root, try newNode(arena, .{ .code_block = .{ .lang = lang, .content = s.input[content_start..] } }));
 }
 
-fn parseIndentedItem(arena: *Arena, s: *Scanner, root: *Node) !bool {
+fn parseIndentedItem(arena: *Arena, s: *Scanner, root: *Node, min_indent: u8) !bool {
   const saved = s.pos;
   const indent = s.skipSpaces();
-  if (indent == 0 or s.eof()) {
+  if (indent <= min_indent or s.eof()) {
     s.pos = saved;
     return false;
   }
@@ -677,7 +733,10 @@ fn parsePlainText(arena: *Arena, s: *Scanner, root: *Node) !void {
   }
 
   const para = try newNode(arena, .paragraph);
-  para.children = try parseInline(arena, line);
+  const hard_break = hasHardBreak(line);
+  const content = if (hard_break) trimHardBreak(line) else line;
+  para.children = try parseInline(arena, content);
+  if (hard_break) appendChild(para, try newNode(arena, .linebreak));
   appendChild(root, para);
   s.skipNewline();
   try appendContinuation(arena, para, s);
@@ -697,7 +756,7 @@ pub fn parse(arena: *Arena, input: Bytes) !*Node {
       '0'...'9' => try parseOrderedList(arena, &s, root),
       '`' => try parseCodeBlock(arena, &s, root),
       ' ' => {
-        if (!try parseIndentedItem(arena, &s, root))
+        if (!try parseIndentedItem(arena, &s, root, 0))
           try parsePlainText(arena, &s, root);
       },
       else => try parsePlainText(arena, &s, root),

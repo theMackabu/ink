@@ -18,7 +18,8 @@ pub const Node = struct {
   };
 
   pub const Ordered = struct { 
-    indent: u8, number: u32, first: bool = false
+    indent: u8, number: u32, 
+    suffix: ?u8 = null, first: bool = false
   };
   
   pub const Task = struct { 
@@ -104,6 +105,10 @@ pub const Node = struct {
         try jw.write("ordered_item");
         try jw.objectField("number");
         try jw.write(ol.number);
+        if (ol.suffix) |s| {
+          try jw.objectField("suffix");
+          try jw.write(&[_]u8{s});
+        }
         try jw.objectField("indent");
         try jw.write(ol.indent);
       },

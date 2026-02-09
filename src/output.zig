@@ -75,6 +75,15 @@ const Ctx = struct {
   show_urls: bool,
   tui: bool = false,
 
+  fn hasNestedItems(nd: *Node) bool {
+    var last: ?*Node = nd.children;
+    while (last) |l| { if (l.next) |nx| { last = nx; } else break; }
+    return if (last) |l| switch (l.kind) {
+      .list_item, .ordered_item, .task_item => true,
+      else => false,
+    } else false;
+  }
+
   fn writeMargin(self: Ctx) anyerror!void {
     var i: u16 = 0;
     while (i < self.margin) : (i += 1) try self.w.writeAll(" ");
@@ -232,16 +241,17 @@ const Ctx = struct {
     try self.writeIndent(if (quoted) @as(u32, li.indent) + 1 else depth + li.indent);
     try self.w.writeAll(ansi.CYAN ++ "•" ++ ansi.RESET ++ " ");
     try self.styled(nd.children, depth, .{});
-    if (!quoted) try self.w.writeAll("\n");
+    if (!quoted and !hasNestedItems(nd)) try self.w.writeAll("\n");
   }
 
   fn renderOrderedItem(self: Ctx, nd: *Node, ol: Node.Ordered, depth: u32, quoted: bool) anyerror!void {
     if (!quoted and ol.first) try self.w.writeAll("\n");
     if (!quoted) try self.writeMargin();
     try self.writeIndent(if (quoted) @as(u32, ol.indent) + 1 else depth + ol.indent);
-    try self.w.print(ansi.CYAN ++ "{d}." ++ ansi.RESET ++ " ", .{ol.number});
+    if (ol.suffix) |s| try self.w.print(ansi.CYAN ++ "{d}{c}." ++ ansi.RESET ++ " ", .{ ol.number, s })
+    else try self.w.print(ansi.CYAN ++ "{d}." ++ ansi.RESET ++ " ", .{ol.number});
     try self.styled(nd.children, depth, .{});
-    if (!quoted) try self.w.writeAll("\n");
+    if (!quoted and !hasNestedItems(nd)) try self.w.writeAll("\n");
   }
 
   fn renderTaskItem(self: Ctx, nd: *Node, ti: Node.Task, depth: u32, quoted: bool) anyerror!void {
