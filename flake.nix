@@ -23,6 +23,7 @@
         }:
         let
           zig = pkgs.zig_0_15;
+          fs = lib.fileset;
           version = lib.pipe ./ink.version [
             builtins.readFile
             lib.trim
@@ -32,7 +33,15 @@
           packages.default = pkgs.stdenv.mkDerivation (finalAttrs: {
             pname = "ink";
             inherit version;
-            src = lib.cleanSource ./.;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./build.zig
+                ./build.zig.zon
+                ./build.utils.zig
+                ./src
+              ];
+            };
 
             deps = pkgs.callPackage ./build.zig.zon.nix { };
 
