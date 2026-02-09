@@ -197,6 +197,9 @@ const Ctx = struct {
       const slug = slugify(text_buf[0..text_pos], &slug_buf);
       if (slug.len > 0) {
         try self.w.writeAll("\x1b_H;");
+        try self.w.print("{d};", .{level});
+        try self.w.writeAll(text_buf[0..text_pos]);
+        try self.w.writeAll(";");
         try self.w.writeAll(slug);
         try self.w.writeAll("\x1b\\");
       }

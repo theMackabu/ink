@@ -27,6 +27,8 @@ pub const FragmentLink = struct {
 pub const HeadingEntry = struct {
   slug: Bytes,
   line_idx: usize,
+  raw: Bytes,
+  h_count: u8,
 };
 
 pub const Line = struct {

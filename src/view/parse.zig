@@ -119,7 +119,17 @@ fn parseApcPayload(
 
   const data = payload[2..];
   switch (tag) {
-    'H' => try headings.append(alloc, .{ .slug = data, .line_idx = line_idx }),
+    'H' => {
+      var iter = std.mem.splitScalar(u8, data, ';');
+      const level_str = iter.next() orelse data;
+      const raw_text = iter.next() orelse data;
+      const slug = iter.next() orelse data;
+      const h_count = std.fmt.parseInt(u8, level_str, 10) catch 1;
+      try headings.append(alloc, .{ 
+        .slug = slug, .line_idx = line_idx, 
+        .raw = raw_text, .h_count = h_count 
+      });
+    },
     'L' => {
       link_state.slug = data;
       link_state.col_start = link_state.current_col;

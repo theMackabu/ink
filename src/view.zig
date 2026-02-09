@@ -13,6 +13,7 @@ pub const viewer = @import("view/viewer.zig");
 pub const watch = @import("view/watch.zig");
 pub const memory = @import("view/memory.zig");
 pub const picker = @import("view/picker.zig");
+pub const outline = @import("view/outline.zig");
 
 const Bytes = types.Bytes;
 const Event = types.Event;
@@ -206,6 +207,13 @@ pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResul
           if (action == .edit) return .edit;
           if (action == .reload) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
           if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+          if (action == .outline) {
+            if (outline.run(tui, v.headings) catch null) |result| {
+              const vrow = v.wrap.logicalToVisual(result.line_idx);
+              v.scroll = if (vrow > 2) vrow - 2 else 0;
+              v.clampScroll();
+            }
+          }
           if (action == .copy_contents) {
             _ = std.Thread.spawn(.{}, scheduleToastDismiss, .{&tui.loop}) catch {};
           }
