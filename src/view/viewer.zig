@@ -54,6 +54,7 @@ pub const Viewer = struct {
   term_h: u16 = 24,
   term_w: u16 = 80,
   dragging: bool = false,
+  show_help: bool = false,
   wrap: WrapLayout,
 
   info_buf: [32]u8 = undefined,
@@ -64,7 +65,8 @@ pub const Viewer = struct {
   pos_slice: []const u8 = "",
 
   pub fn contentHeight(self: *const Viewer) u16 {
-    return self.term_h -| 1;
+    const footer_h: u16 = if (self.show_help) 6 else 1;
+    return self.term_h -| footer_h;
   }
 
   pub fn gutterWidth(self: *const Viewer) u16 {
@@ -381,19 +383,26 @@ pub const Viewer = struct {
   }
 
   fn drawFooter(self: *Viewer, win: vaxis.Window) void {
-    const y = self.term_h -| 1;
-    const bar = win.child(.{ .y_off = y, .height = 1 });
+    const bar_y = self.contentHeight();
+    const bar = win.child(.{ .y_off = bar_y, .height = 1 });
     const bg: vaxis.Style = .{
       .bg = .{ .rgb = .{ 40, 40, 50 } },
       .fg = .{ .rgb = .{ 130, 130, 150 } },
     };
     bar.fill(.{ .style = bg });
 
+    const brand_style: vaxis.Style = .{
+      .bg = .{ .rgb = .{ 130, 90, 220 } },
+      .fg = .{ .rgb = .{ 240, 240, 255 } },
+      .bold = true,
+    };
+    var left = writeStr(bar, 0, 0, " Ink ", brand_style);
+
     const name_style: vaxis.Style = .{
       .bg = .{ .rgb = .{ 40, 40, 50 } },
       .fg = .{ .rgb = .{ 180, 180, 200 } },
     };
-    var left = writeStr(bar, 1, 0, self.filename, name_style);
+    left = writeStr(bar, left + 1, 0, self.filename, name_style);
     left = writeStr(bar, left + 1, 0, " ", bg);
 
     if (self.search.active) {
@@ -420,8 +429,27 @@ pub const Viewer = struct {
         .bg = .{ .rgb = .{ 40, 40, 50 } },
         .fg = .{ .rgb = .{ 255, 200, 60 } },
       });
-      left = writeStr(bar, left + 1, 0, "n/N/enter next/prev  esc clear", bg);
-    } else left = writeStr(bar, left, 0, "q quit  / search  g/G top/end  l lines  U urls", bg);
+    }
+
+    if (!self.show_help) {
+      const ik: vaxis.Style = .{ .bg = bg.bg, .fg = .{ .rgb = .{ 143, 143, 176 } } };
+      const id: vaxis.Style = .{ .bg = bg.bg, .fg = .{ .rgb = .{ 98, 98, 124 } } };
+      const it: vaxis.Style = .{ .bg = bg.bg, .fg = .{ .rgb = .{ 72, 72, 91 } } };
+      if (self.search.matches.items.len > 0) {
+        left += 2;
+        left = writeStr(bar, left, 0, "n/N", ik);
+        left = writeStr(bar, left + 1, 0, "next/prev", id);
+        left = writeStr(bar, left, 0, " • ", it);
+        left = writeStr(bar, left, 0, "esc", ik);
+        left = writeStr(bar, left + 1, 0, "clear", id);
+      } else if (!self.search.active) {
+        left = writeStr(bar, left, 0, "/", ik);
+        left = writeStr(bar, left + 1, 0, "find", id);
+        left = writeStr(bar, left, 0, " • ", it);
+        left = writeStr(bar, left, 0, "?", ik);
+        _ = writeStr(bar, left + 1, 0, "more", id);
+      }
+    }
 
     if (self.totalVisualRows() <= self.contentHeight()) {
       self.pos_slice = "All ";
@@ -439,6 +467,51 @@ pub const Viewer = struct {
     const right_start = self.term_w -| @as(u16, @intCast(@min(right_len, self.term_w)));
     const rc = writeStr(bar, right_start, 0, self.pos_slice, bg);
     _ = writeStr(bar, rc, 0, self.info_slice, bg);
+
+    if (self.show_help) {
+      self.drawHelp(win, bar_y + 2);
+    }
+  }
+
+  fn drawHelp(self: *Viewer, win: vaxis.Window, y: u16) void {
+    const ks: vaxis.Style = .{ .fg = .{ .rgb = .{ 110, 110, 135 } } };
+    const ds: vaxis.Style = .{ .fg = .{ .rgb = .{ 75, 75, 95 } } };
+
+    if (self.search.active or self.search.matches.items.len > 0) {
+      const help = win.child(.{ .x_off = 1, .y_off = y, .height = 3 });
+      var c: u16 = undefined;
+
+      c = writeStr(help, 1, 0, "enter/n", ks);
+      _ = writeStr(help, c + 1, 0, "next match", ds);
+
+      c = writeStr(help, 1, 1, "N", ks);
+      _ = writeStr(help, c + 1, 1, "prev match", ds);
+
+      c = writeStr(help, 1, 2, "esc", ks);
+      _ = writeStr(help, c + 1, 2, "clear search", ds);
+    } else {
+      const help = win.child(.{ .x_off = 1, .y_off = y, .height = 4 });
+      const col2: u16 = 22;
+      var c: u16 = undefined;
+
+      c = writeStr(help, 1, 0, "/", ks);
+      _ = writeStr(help, c + 1, 0, "find", ds);
+      c = writeStr(help, col2, 0, "q", ks);
+      _ = writeStr(help, c + 1, 0, "quit", ds);
+
+      c = writeStr(help, 1, 1, "j/k ↑/↓", ks);
+      _ = writeStr(help, c + 1, 1, "scroll", ds);
+      c = writeStr(help, col2, 1, "l", ks);
+      _ = writeStr(help, c + 1, 1, "lines", ds);
+
+      c = writeStr(help, 1, 2, "g/G", ks);
+      _ = writeStr(help, c + 1, 2, "top/bottom", ds);
+      c = writeStr(help, col2, 2, "U", ks);
+      _ = writeStr(help, c + 1, 2, "urls", ds);
+
+      _ = writeStr(help, col2, 3, "?", ks);
+      _ = writeStr(help, col2 + 2, 3, "close help", ds);
+    }
   }
 
   fn isMatchLine(self: *const Viewer, idx: usize) bool {
@@ -499,6 +572,7 @@ pub const Viewer = struct {
     half_page_up,
     toggle_lines,
     toggle_urls,
+    toggle_help,
   };
 
   const Binding = struct { u21, Key.Modifiers, Action };
@@ -524,6 +598,7 @@ pub const Viewer = struct {
     .{ 'u',           .{ .ctrl = true },  .half_page_up },
     .{ 'l',           .{},                .toggle_lines },
     .{ 'U',           .{ .shift = true }, .toggle_urls },
+    .{ '?',           .{ .shift = true }, .toggle_help },
   };
 
   pub fn handleKeyPress(self: *Viewer, key: Key) Action {
@@ -566,6 +641,7 @@ pub const Viewer = struct {
         self.show_urls = !self.show_urls;
         self.saveMemory();
       },
+      .toggle_help => self.show_help = !self.show_help,
       .quit, .none => {},
     }
   }
