@@ -394,6 +394,7 @@ fn isBlockStartAt(input: Bytes, pos: usize) bool {
     '\n', '#', '>', '|' => true,
     '-', '*' => |c| (s.at(1) == c and s.at(2) == c) or s.at(1) == ' ',
     '`' => s.at(1) == '`' and s.at(2) == '`',
+    '~' => s.at(1) == '~' and s.at(2) == '~',
     '0'...'9' => blk: {
       var p = pos;
       while (p < input.len and input[p] >= '0' and input[p] <= '9') : (p += 1) {}
@@ -670,31 +671,80 @@ fn parseOrderedList(arena: *Arena, s: *Scanner, root: *Node) !void {
     try parseParagraphLine(arena, s, root);
 }
 
-fn parseCodeBlock(arena: *Arena, s: *Scanner, root: *Node) !void {
-  if (s.at(1) != '`' or s.at(2) != '`') return parseParagraphLine(arena, s, root);
+fn tryParseFencedCodeBlock(arena: *Arena, s: *Scanner, root: *Node, leading_indent: u8) !bool {
+  const fence_char = s.cur();
+  if (fence_char != '`' and fence_char != '~') return false;
 
-  s.advance(3);
-  const lang = s.scanUntil('\n');
-  if (!s.eof()) s.advance(1);
-  const content_start = s.pos;
-  var content_end = s.pos;
+  const fence_start = s.pos;
+  const fence_len = s.countRun(fence_char);
+  
+  if (fence_len < 3) return false;
+  s.advance(fence_len);
 
-  while (!s.eof()) {
-    if (s.cur() == '\n') {
-      content_end = s.pos;
-      s.advance(1);
-      continue;
-    }
-    if (s.cur() == '`' and s.at(1) == '`' and s.at(2) == '`') {
-      s.advance(3);
-      s.skipNewline();
-      appendChild(root, try newNode(arena, .{ .code_block = .{ .lang = lang, .content = s.input[content_start..content_end] } }));
-      return;
-    }
-    s.advance(1);
+  const info_raw = s.readLine();
+  const info_trimmed = std.mem.trim(u8, info_raw, " \t");
+
+  if (fence_char == '`' and std.mem.indexOfScalar(u8, info_trimmed, '`') != null) {
+    s.pos = fence_start;
+    return false;
   }
 
-  appendChild(root, try newNode(arena, .{ .code_block = .{ .lang = lang, .content = s.input[content_start..] } }));
+  const lang = if (std.mem.indexOfAny(u8, info_trimmed, " \t")) |i| info_trimmed[0..i] else info_trimmed;
+  if (!s.eof()) s.advance(1);
+
+  const alloc = arena.allocator();
+  var content_buf: std.ArrayListUnmanaged(u8) = .empty;
+  var first_line = true;
+
+  while (!s.eof()) {
+    const line_start = s.pos;
+    var close_indent: u8 = 0;
+    while (!s.eof() and s.cur() == ' ' and close_indent < 4) : (close_indent += 1) s.advance(1);
+
+    const close_len = if (!s.eof() and s.cur() == fence_char) s.countRun(fence_char) else 0;
+    const trailing = s.input[s.pos + close_len ..];
+    
+    const rest = if (std.mem.indexOfScalar(u8, trailing, '\n')) |i| trailing[0..i] else trailing;
+    const only_spaces = std.mem.trim(u8, rest, " ").len == 0;
+
+    if (close_len >= fence_len and close_indent < 4 and only_spaces) {
+      s.advance(close_len);
+      while (!s.eof() and s.cur() == ' ') s.advance(1);
+      s.skipNewline();
+
+      appendChild(root, try newNode(arena, .{ .code_block = .{
+        .lang = lang,
+        .content = content_buf.items,
+      }}));
+      
+      return true;
+    }
+
+    s.pos = line_start;
+    const content_line = s.readLine();
+
+    const n = @min(leading_indent, content_line.len);
+    const spaces = n - std.mem.trimLeft(u8, content_line[0..n], " ").len;
+
+    if (!first_line) try content_buf.append(alloc, '\n');
+    first_line = false;
+    
+    try content_buf.appendSlice(alloc, content_line[spaces..]);
+    s.skipNewline();
+  }
+
+  const content = content_buf.items;
+  appendChild(root, try newNode(arena, .{ .code_block = .{
+    .lang = lang,
+    .content = content,
+  }}));
+  
+  return true;
+}
+
+fn parseCodeBlock(arena: *Arena, s: *Scanner, root: *Node) !void {
+  if (!try tryParseFencedCodeBlock(arena, s, root, 0)) 
+    return parseParagraphLine(arena, s, root);
 }
 
 fn parseIndentedItem(arena: *Arena, s: *Scanner, root: *Node, min_indent: u8) !bool {
@@ -716,9 +766,10 @@ fn parseIndentedItem(arena: *Arena, s: *Scanner, root: *Node, min_indent: u8) !b
     if (try parseOrderedItem(arena, s, root, indent)) return true;
   }
 
-  if (c == '`' and s.at(1) == '`' and s.at(2) == '`') {
-    try parseCodeBlock(arena, s, root);
-    return true;
+  if (indent <= 3 and (c == '`' or c == '~') and s.at(1) == c and s.at(2) == c) {
+    if (try tryParseFencedCodeBlock(arena, s, root, indent)) return true;
+    s.pos = saved;
+    return false;
   }
 
   s.pos = saved;
@@ -754,7 +805,7 @@ pub fn parse(arena: *Arena, input: Bytes) !*Node {
       '>' => try parseBlockquote(arena, &s, root),
       '|' => try parseTable(arena, &s, root),
       '0'...'9' => try parseOrderedList(arena, &s, root),
-      '`' => try parseCodeBlock(arena, &s, root),
+      '`', '~' => try parseCodeBlock(arena, &s, root),
       ' ' => {
         if (!try parseIndentedItem(arena, &s, root, 0))
           try parsePlainText(arena, &s, root);

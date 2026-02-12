@@ -43,3 +43,13 @@ Regular paragraph with multiple inline elements.
 const world = "world"
 console.log(`hello ${world}`)
 ```
+
+~~~c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+  fputs("Hello World!", stdout);
+  return EXIT_SUCCESS;
+}
+~~~
