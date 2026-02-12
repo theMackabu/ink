@@ -1,9 +1,10 @@
-# Fast Markdown Parser
+# Fast Markdown Parser #
 
 This is a **bold** statement with _italic_ text. <br/>
 Here's some `inline code` too.
 
-## Features
+Features
+--------
 
 - Fast parsing with **Zig**!
 - Minimal memory allocations
@@ -38,6 +39,9 @@ Regular paragraph with multiple inline elements.
 
 - [ ] unchecked task
 - [x] checked task
+
+Have some code
+==============
 
 ```javascript
 const world = "world"

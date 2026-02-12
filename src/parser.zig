@@ -91,6 +91,34 @@ fn isFirstItem(parent: *Node) bool {
   return !isListKind(prev.kind);
 }
 
+fn trimClosingHashes(line: Bytes) Bytes {
+  var end = line.len;
+  while (end > 0 and line[end - 1] == ' ') : (end -= 1) {}
+  if (end == 0 or line[end - 1] != '#') return std.mem.trimRight(u8, line, " ");
+  while (end > 0 and line[end - 1] == '#') : (end -= 1) {}
+  if (end == 0 or line[end - 1] == ' ') return std.mem.trimRight(u8, line[0..end], " ");
+  return std.mem.trimRight(u8, line, " ");
+}
+
+fn isSetextUnderline(input: Bytes, pos: usize) ?u3 {
+  var p = pos;
+  var indent: u8 = 0;
+  while (p < input.len and input[p] == ' ' and indent < 3) : (indent += 1) p += 1;
+  if (p >= input.len) return null;
+  if (p < input.len and input[p] == ' ') return null;
+  const ch = input[p];
+  if (ch != '=' and ch != '-') return null;
+  while (p < input.len and input[p] == ch) : (p += 1) {}
+  while (p < input.len and (input[p] == ' ' or input[p] == '\t')) : (p += 1) {}
+  if (p < input.len and input[p] != '\n') return null;
+  return if (ch == '=') 1 else 2;
+}
+
+fn consumeSetextUnderline(s: *Scanner) void {
+  _ = s.readLine();
+  s.skipNewline();
+}
+
 fn hasHardBreak(line: Bytes) bool {
   return line.len >= 2 and line[line.len - 1] == ' ' and line[line.len - 2] == ' ';
 }
@@ -531,29 +559,50 @@ fn appendItemContinuation(arena: *Arena, item: *Node, s: *Scanner, indent: u8, p
   }
 }
 
-fn appendContinuation(arena: *Arena, para: *Node, s: *Scanner) !void {
-  while (!s.eof() and !isBlockStart(s.input, s.pos)) {
+fn appendContinuation(arena: *Arena, para: *Node, s: *Scanner, setext_ok: bool) !void {
+  while (!s.eof()) {
+    if (setext_ok) {
+      if (isSetextUnderline(s.input, s.pos)) |level| {
+        para.kind = .{ .heading = level };
+        consumeSetextUnderline(s);
+        return;
+      }
+    }
+    if (isBlockStart(s.input, s.pos)) break;
+
     const cont = s.readLine();
     if (cont.len == 0) break;
+    s.skipNewline();
 
-    const tail = blk: {
-      var t = para.children.?;
-      while (t.next) |nx| t = nx;
-      break :blk t;
-    };
-    if (tail.kind != .linebreak) appendChild(para, try newNode(arena, .{ .text = " " }));
+    if (setext_ok and contentIndent(cont) <= 3) {
+      if (isSetextUnderline(s.input, s.pos)) |level| {
+        appendContLine(arena, para, std.mem.trimRight(u8, cont, " ")) catch break;
+        para.kind = .{ .heading = level };
+        consumeSetextUnderline(s);
+        return;
+      }
+    }
 
     const hard_break = hasHardBreak(cont);
     const content = if (hard_break) trimHardBreak(cont) else cont;
-    var inl = try parseInline(arena, content);
-    while (inl) |n| {
-      const next = n.next;
-      n.next = null;
-      appendChild(para, n);
-      inl = next;
-    }
+    appendContLine(arena, para, content) catch break;
     if (hard_break) appendChild(para, try newNode(arena, .linebreak));
-    s.skipNewline();
+  }
+}
+
+fn appendContLine(arena: *Arena, para: *Node, content: Bytes) !void {
+  const tail = blk: {
+    var t = para.children.?;
+    while (t.next) |nx| t = nx;
+    break :blk t;
+  };
+  if (tail.kind != .linebreak) appendChild(para, try newNode(arena, .{ .text = " " }));
+  var inl = try parseInline(arena, content);
+  while (inl) |n| {
+    const next = n.next;
+    n.next = null;
+    appendChild(para, n);
+    inl = next;
   }
 }
 
@@ -564,7 +613,8 @@ fn parseHeading(arena: *Arena, s: *Scanner, root: *Node) !void {
   if (s.at(level) != ' ') return parseParagraphLine(arena, s, root);
 
   s.advance(@as(usize, level) + 1);
-  const line = s.readLine();
+  const raw = s.readLine();
+  const line = trimClosingHashes(raw);
   const h = try newNode(arena, .{ .heading = level });
   h.children = try parseInline(arena, line);
   appendChild(root, h);
@@ -776,11 +826,29 @@ fn parseIndentedItem(arena: *Arena, s: *Scanner, root: *Node, min_indent: u8) !b
   return false;
 }
 
+fn contentIndent(line: Bytes) usize {
+  var i: usize = 0;
+  while (i < line.len and line[i] == ' ') : (i += 1) {}
+  return i;
+}
+
 fn parsePlainText(arena: *Arena, s: *Scanner, root: *Node) !void {
   const line = s.readLine();
   if (line.len == 0 or std.mem.trim(u8, line, " \t").len == 0) {
     s.skipNewline();
     return;
+  }
+
+  s.skipNewline();
+
+  if (contentIndent(line) <= 3) {
+    if (isSetextUnderline(s.input, s.pos)) |level| {
+      const h = try newNode(arena, .{ .heading = level });
+      h.children = try parseInline(arena, std.mem.trim(u8, line, " "));
+      appendChild(root, h);
+      consumeSetextUnderline(s);
+      return;
+    }
   }
 
   const para = try newNode(arena, .paragraph);
@@ -789,8 +857,7 @@ fn parsePlainText(arena: *Arena, s: *Scanner, root: *Node) !void {
   para.children = try parseInline(arena, content);
   if (hard_break) appendChild(para, try newNode(arena, .linebreak));
   appendChild(root, para);
-  s.skipNewline();
-  try appendContinuation(arena, para, s);
+  try appendContinuation(arena, para, s, contentIndent(line) <= 3);
 }
 
 pub fn parse(arena: *Arena, input: Bytes) !*Node {
