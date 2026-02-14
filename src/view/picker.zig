@@ -798,7 +798,7 @@ pub fn run(tui: *Tui) !?PickerResult {
         }
       },
       .key_press => |key| {
-        if (!picker.scanning and key.matches('r', .{})) {
+        if (!picker.scanning and !picker.search_state.active and key.matches('r', .{})) {
           picker.refresh(&tui.loop);
           scan_state = alloc.create(ScanState) catch continue;
           scan_state.* = .{ .alloc = alloc, .loop = &tui.loop };
