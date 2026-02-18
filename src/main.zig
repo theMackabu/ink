@@ -262,6 +262,7 @@ fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: boo
   var last_mtime: i128 = 0;
   var last_size: u64 = 0;
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
+  defer highlighter.deinit();
 
   while (true) {
     const stat = std.fs.cwd().statFile(path) catch {
