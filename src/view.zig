@@ -25,7 +25,7 @@ const Memory = memory.Memory;
 
 pub const RunResult = enum { quit, back_to_picker, edit };
 
-fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool) !struct { rendered: Bytes, arena: *node.Arena } {
+fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool, highlighter: *hl.Highlighter) !struct { rendered: Bytes, arena: *node.Arena } {
   var arena = try alloc.create(node.Arena);
   arena.* = node.Arena.init(std.heap.page_allocator);
 
@@ -35,11 +35,9 @@ fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool) !struct
   const markdown = try file.readToEndAlloc(arena.allocator(), std.math.maxInt(usize));
   const root = try parser.parse(arena, markdown);
 
-  var highlighter = try hl.Highlighter.init(std.heap.page_allocator);
-
   var aw: std.Io.Writer.Allocating = .init(alloc);
   try output.render(&aw.writer, root, .{
-    .highlighter = &highlighter,
+    .highlighter = highlighter,
     .show_urls = show_urls,
     .tui = true,
   });
@@ -51,8 +49,8 @@ fn reloadContent(alloc: std.mem.Allocator, path: Bytes, show_urls: bool) !struct
   return .{ .rendered = rendered, .arena = arena };
 }
 
-fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_rendered: *?[]const u8, prev_arena: *?*node.Arena, prev_parsed: *types.ParseResult) void {
-  const result = reloadContent(alloc, filename, v.show_urls) catch return;
+fn refreshContent(alloc: std.mem.Allocator, filename: Bytes, v: *Viewer, prev_rendered: *?[]const u8, prev_arena: *?*node.Arena, prev_parsed: *types.ParseResult, highlighter: *hl.Highlighter) void {
+  const result = reloadContent(alloc, filename, v.show_urls, highlighter) catch return;
   const new_parsed = parse.parseAnsiLines(alloc, result.rendered) catch {
     alloc.free(result.rendered);
     result.arena.deinit();
@@ -148,7 +146,7 @@ pub const Tui = struct {
   }
 };
 
-pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResult {
+pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options, highlighter: *hl.Highlighter) !RunResult {
   const alloc = tui.alloc;
   var parsed = try parse.parseAnsiLines(alloc, rendered);
   const mem = Memory.load(alloc);
@@ -202,7 +200,7 @@ pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResul
     const event = tui.loop.nextEvent();
     switch (event) {
       .file_changed => {
-        refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+        refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed, highlighter);
       },
       .key_press => |key| {
         if (v.yank_active) {
@@ -218,9 +216,9 @@ pub fn run(tui: *Tui, rendered: Bytes, filename: Bytes, opts: Options) !RunResul
           if (action == .back_to_picker) return .back_to_picker;
           if (action == .edit) return .edit;
           if (action == .reload) {
-            refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+            refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed, highlighter);
           }
-          if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed);
+          if (action == .toggle_urls) refreshContent(alloc, filename, &v, &prev_rendered, &prev_arena, &parsed, highlighter);
           if (action == .outline) {
             if (outline.run(tui, v.headings) catch null) |result| {
               const vrow = v.wrap.logicalToVisual(result.line_idx);
