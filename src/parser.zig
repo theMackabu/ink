@@ -9,6 +9,7 @@ const Align = Node.Table.Align;
 const newNode = node.newNode;
 const appendNode = node.appendNode;
 const appendChild = node.appendChild;
+const appendChildren = node.appendChildren;
 
 const Scanner = struct {
   input: Bytes,
@@ -130,13 +131,7 @@ fn trimHardBreak(line: Bytes) Bytes {
 fn parseInlineWithBreak(arena: *Arena, parent: *Node, line: Bytes) !void {
   const hard_break = hasHardBreak(line);
   const content = if (hard_break) trimHardBreak(line) else line;
-  var inl = try parseInline(arena, content);
-  while (inl) |n| {
-    const next = n.next;
-    n.next = null;
-    appendChild(parent, n);
-    inl = next;
-  }
+  appendChildren(parent, try parseInline(arena, content));
   if (hard_break) appendChild(parent, try newNode(arena, .linebreak));
 }
 
@@ -177,9 +172,9 @@ fn parseEmphasis(arena: *Arena, root: *?*Node, last: *?*Node, s: *Scanner) !usiz
     const close = findClose(s.input, s.pos, c, 3);
     const inner = s.input[s.pos..@min(close, s.input.len)];
     const italic = try newNode(arena, .italic);
-    italic.children = try parseInline(arena, inner);
+    appendChildren(italic, try parseInline(arena, inner));
     const bold = try newNode(arena, .bold);
-    bold.children = italic;
+    appendChild(bold, italic);
     appendNode(root, last, bold);
     s.pos = if (close < s.input.len) close + 3 else close;
   } else if (run == 2) {
@@ -187,7 +182,7 @@ fn parseEmphasis(arena: *Arena, root: *?*Node, last: *?*Node, s: *Scanner) !usiz
     const close = findClose(s.input, s.pos, c, 2);
     const inner = s.input[s.pos..@min(close, s.input.len)];
     const bold = try newNode(arena, .bold);
-    bold.children = try parseInline(arena, inner);
+    appendChildren(bold, try parseInline(arena, inner));
     appendNode(root, last, bold);
     s.pos = if (close < s.input.len) close + 2 else close;
   } else {
@@ -195,7 +190,7 @@ fn parseEmphasis(arena: *Arena, root: *?*Node, last: *?*Node, s: *Scanner) !usiz
     const close = findClose(s.input, s.pos, c, 1);
     if (close < s.input.len) {
       const italic = try newNode(arena, .italic);
-      italic.children = try parseInline(arena, s.input[s.pos..close]);
+      appendChildren(italic, try parseInline(arena, s.input[s.pos..close]));
       appendNode(root, last, italic);
       s.pos = close + 1;
     } else {
@@ -368,7 +363,7 @@ fn parseTableRow(arena: *Arena, s: *Scanner, kind: Node.Kind) !*Node {
   for (result.cells[0..result.count]) |cell| {
     const trimmed = std.mem.trim(u8, cell, " ");
     const cell_node = try newNode(arena, .table_cell);
-    cell_node.children = try parseInline(arena, trimmed);
+    appendChildren(cell_node, try parseInline(arena, trimmed));
     appendChild(row, cell_node);
   }
   s.skipNewline();
@@ -455,7 +450,7 @@ fn parseListItem(arena: *Arena, s: *Scanner, parent: *Node, indent: u8) !void {
     const item = try newNode(arena, .{ .task_item = .{ .indent = indent, .checked = checked, .first = isFirstItem(parent) } });
     const hard_break = hasHardBreak(line);
     const content = if (hard_break) trimHardBreak(line) else line;
-    item.children = try parseInline(arena, content);
+    appendChildren(item, try parseInline(arena, content));
     appendChild(parent, item);
     s.skipNewline();
     try appendItemContinuation(arena, item, s, indent, hard_break);
@@ -464,7 +459,7 @@ fn parseListItem(arena: *Arena, s: *Scanner, parent: *Node, indent: u8) !void {
     const item = try newNode(arena, .{ .list_item = .{ .indent = indent, .first = isFirstItem(parent) } });
     const hard_break = hasHardBreak(line);
     const content = if (hard_break) trimHardBreak(line) else line;
-    item.children = try parseInline(arena, content);
+    appendChildren(item, try parseInline(arena, content));
     appendChild(parent, item);
     s.skipNewline();
     try appendItemContinuation(arena, item, s, indent, hard_break);
@@ -493,7 +488,7 @@ fn parseOrderedItem(arena: *Arena, s: *Scanner, parent: *Node, indent: u8) !bool
   const item = try newNode(arena, .{ .ordered_item = .{ .indent = indent, .number = number, .suffix = suffix, .first = isFirstItem(parent) } });
   const hard_break = hasHardBreak(line);
   const content = if (hard_break) trimHardBreak(line) else line;
-  item.children = try parseInline(arena, content);
+  appendChildren(item, try parseInline(arena, content));
   appendChild(parent, item);
   s.skipNewline();
   try appendItemContinuation(arena, item, s, indent, hard_break);
@@ -506,7 +501,7 @@ fn parseParagraphLine(arena: *Arena, s: *Scanner, parent: *Node) !void {
     const para = try newNode(arena, .paragraph);
     const hard_break = hasHardBreak(line);
     const content = if (hard_break) trimHardBreak(line) else line;
-    para.children = try parseInline(arena, content);
+    appendChildren(para, try parseInline(arena, content));
     if (hard_break) appendChild(para, try newNode(arena, .linebreak));
     appendChild(parent, para);
   }
@@ -540,13 +535,7 @@ fn appendItemContinuation(arena: *Arena, item: *Node, s: *Scanner, indent: u8, p
 
     const hard_break = hasHardBreak(cont);
     const content = if (hard_break) trimHardBreak(cont) else cont;
-    var inl = try parseInline(arena, content);
-    while (inl) |n| {
-      const next = n.next;
-      n.next = null;
-      appendChild(item, n);
-      inl = next;
-    }
+    appendChildren(item, try parseInline(arena, content));
     if (hard_break) appendChild(item, try newNode(arena, .linebreak));
     s.skipNewline();
   }
@@ -585,13 +574,7 @@ fn appendContinuation(arena: *Arena, para: *Node, s: *Scanner, setext_ok: bool) 
 
 fn appendContLine(arena: *Arena, para: *Node, content: Bytes) !void {
   if (para.last_child.?.kind != .linebreak) appendChild(para, try newNode(arena, .{ .text = " " }));
-  var inl = try parseInline(arena, content);
-  while (inl) |n| {
-    const next = n.next;
-    n.next = null;
-    appendChild(para, n);
-    inl = next;
-  }
+  appendChildren(para, try parseInline(arena, content));
 }
 
 fn parseHeading(arena: *Arena, s: *Scanner, root: *Node) !void {
@@ -604,7 +587,7 @@ fn parseHeading(arena: *Arena, s: *Scanner, root: *Node) !void {
   const raw = s.readLine();
   const line = trimClosingHashes(raw);
   const h = try newNode(arena, .{ .heading = level });
-  h.children = try parseInline(arena, line);
+  appendChildren(h, try parseInline(arena, line));
   appendChild(root, h);
   s.skipNewline();
 }
@@ -654,7 +637,7 @@ fn parseBlockquoteLine(arena: *Arena, s: *Scanner, parent: *Node) !void {
       const line = s.readLine();
       if (line.len > 0) {
         const para = try newNode(arena, .paragraph);
-        para.children = try parseInline(arena, line);
+        appendChildren(para, try parseInline(arena, line));
         appendChild(parent, para);
       }
       s.skipNewline();
@@ -662,7 +645,7 @@ fn parseBlockquoteLine(arena: *Arena, s: *Scanner, parent: *Node) !void {
   } else {
     const line = s.readLine();
     const para = try newNode(arena, .paragraph);
-    para.children = try parseInline(arena, line);
+    appendChildren(para, try parseInline(arena, line));
     appendChild(parent, para);
     s.skipNewline();
   }
@@ -832,7 +815,7 @@ fn parsePlainText(arena: *Arena, s: *Scanner, root: *Node) !void {
   if (contentIndent(line) <= 3) {
     if (isSetextUnderline(s.input, s.pos)) |level| {
       const h = try newNode(arena, .{ .heading = level });
-      h.children = try parseInline(arena, std.mem.trim(u8, line, " "));
+      appendChildren(h, try parseInline(arena, std.mem.trim(u8, line, " ")));
       appendChild(root, h);
       consumeSetextUnderline(s);
       return;
@@ -842,7 +825,7 @@ fn parsePlainText(arena: *Arena, s: *Scanner, root: *Node) !void {
   const para = try newNode(arena, .paragraph);
   const hard_break = hasHardBreak(line);
   const content = if (hard_break) trimHardBreak(line) else line;
-  para.children = try parseInline(arena, content);
+  appendChildren(para, try parseInline(arena, content));
   if (hard_break) appendChild(para, try newNode(arena, .linebreak));
   appendChild(root, para);
   try appendContinuation(arena, para, s, contentIndent(line) <= 3);

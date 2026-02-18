@@ -178,3 +178,13 @@ pub fn appendChild(parent: *Node, child: *Node) void {
   }
   parent.last_child = child;
 }
+
+pub fn appendChildren(parent: *Node, list: ?*Node) void {
+  var cur = list;
+  while (cur) |n| {
+    const next = n.next;
+    n.next = null;
+    appendChild(parent, n);
+    cur = next;
+  }
+}
