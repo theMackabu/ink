@@ -3,10 +3,11 @@ const utils = @import("build.utils.zig");
 const Bytes = @import("src/node.zig").Bytes;
 
 pub fn build(b: *std.Build) void {
+  const optimize = std.builtin.OptimizeMode.ReleaseFast;
   const target = b.standardTargetOptions(.{});
   const opts: std.Build.Module.CreateOptions = .{
     .target = target,
-    .optimize = .ReleaseFast,
+    .optimize = optimize,
     .omit_frame_pointer = true,
     .unwind_tables = .none,
     .strip = true,
@@ -14,16 +15,16 @@ pub fn build(b: *std.Build) void {
 
   const syntax_dep = b.dependency("flow_syntax", .{
     .target = target,
-    .optimize = .ReleaseFast,
+    .optimize = optimize,
   });
   const vaxis_dep = b.dependency("vaxis", .{
     .target = target,
-    .optimize = .ReleaseFast,
+    .optimize = optimize,
   });
 
   const clap_dep = b.dependency("clap", .{
     .target = target,
-    .optimize = .ReleaseFast,
+    .optimize = optimize,
   });
 
   const lib_ink = b.addModule("ink", .{
