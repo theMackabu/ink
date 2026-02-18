@@ -120,12 +120,13 @@ pub const Viewer = struct {
   pub fn rebuildWrap(self: *Viewer, win: vaxis.Window) !void {
     const cw = self.contentWidth();
     if (self.wrap.width == cw and self.wrap.line_counts.items.len == self.lines.len) return;
-
     const anchor = self.wrap.visualToLogical(self.scroll);
-
+    
     try self.wrap.rebuild(self.lines, cw, win);
-
-    self.scroll = self.wrap.logicalToVisual(anchor.line_idx) + @min(anchor.wrap_row, self.wrap.wrapCount(anchor.line_idx) -| 1);
+    if (self.lines.len == 0) self.scroll = 0 else {
+      self.scroll = self.wrap.logicalToVisual(anchor.line_idx) + @min(anchor.wrap_row, self.wrap.wrapCount(anchor.line_idx) -| 1);
+    }
+    
     self.clampScroll();
   }
 

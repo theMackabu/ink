@@ -155,6 +155,7 @@ fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {
 
   const ctx = cli.Ctx.init(alloc);
   const markdown = readFile(&arena, opts.path, ctx) orelse return .quit;
+  if (markdown.len == 0) return if (opts.has_picker) .back_to_picker else .quit;
   const root = try ink.parse(&arena, markdown);
 
   var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
