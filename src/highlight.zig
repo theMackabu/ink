@@ -23,6 +23,10 @@ pub const Highlighter = struct {
     };
   }
 
+  pub fn deinit(self: *Highlighter) void {
+    self.query_cache.deinit();
+  }
+
   pub fn highlight(self: *Highlighter, content: Bytes, lang: Bytes, spans: *std.ArrayList(Span)) !bool {
     const parser = Syntax.create_file_type_static(self.allocator, lang, self.query_cache) catch return false;
     

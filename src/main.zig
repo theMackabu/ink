@@ -140,6 +140,7 @@ fn handleEditor(tui: *ink.tui.Tui, path: []const u8, ctx: cli.Ctx) void {
 
 fn viewLoop(tui: *ink.tui.Tui, opts: TuiOptions, ctx: cli.Ctx) !bool {
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
+  defer highlighter.deinit();
   while (true) switch (try launchTui(tui, opts, &highlighter)) {
     .quit => return true,
     .back_to_picker => return false,
@@ -224,7 +225,8 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
 
   const base_dir = std.fs.path.dirname(path) orelse ".";
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-  
+  defer highlighter.deinit();
+
   try ink.render(w, root, .{ 
     .highlighter = &highlighter, .margin = mem.margin, 
     .line_wrap_percent = mem.line_wrap_percent, .base_path = base_dir 
