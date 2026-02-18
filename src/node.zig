@@ -8,6 +8,7 @@ pub const Node = struct {
   kind: Kind,
   next: ?*Node = null,
   children: ?*Node = null,
+  last_child: ?*Node = null,
 
   pub const Link = struct { 
     label: Bytes, url: Bytes 
@@ -170,12 +171,20 @@ pub fn appendNode(root: *?*Node, last: *?*Node, n: *Node) void {
 }
 
 pub fn appendChild(parent: *Node, child: *Node) void {
-  if (parent.children == null) {
+  if (parent.last_child) |tail| {
+    tail.next = child;
+  } else {
     parent.children = child;
-    return;
   }
-  
-  var tail = parent.children.?;
-  while (tail.next) |nx| tail = nx;
-  tail.next = child;
+  parent.last_child = child;
+}
+
+pub fn appendChildren(parent: *Node, list: ?*Node) void {
+  var cur = list;
+  while (cur) |n| {
+    const next = n.next;
+    n.next = null;
+    appendChild(parent, n);
+    cur = next;
+  }
 }
