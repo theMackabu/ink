@@ -81,9 +81,7 @@ fn isListKind(kind: Node.Kind) bool {
 }
 
 fn lastChild(parent: *Node) ?*Node {
-  var tail = parent.children orelse return null;
-  while (tail.next) |nx| tail = nx;
-  return tail;
+  return parent.last_child;
 }
 
 fn isFirstItem(parent: *Node) bool {
@@ -538,12 +536,7 @@ fn appendItemContinuation(arena: *Arena, item: *Node, s: *Scanner, indent: u8, p
     const cont = s.readLine();
     if (cont.len == 0) break;
 
-    const tail = blk: {
-      var t = item.children.?;
-      while (t.next) |nx| t = nx;
-      break :blk t;
-    };
-    if (tail.kind != .linebreak) appendChild(item, try newNode(arena, .{ .text = " " }));
+    if (item.last_child.?.kind != .linebreak) appendChild(item, try newNode(arena, .{ .text = " " }));
 
     const hard_break = hasHardBreak(cont);
     const content = if (hard_break) trimHardBreak(cont) else cont;
@@ -591,12 +584,7 @@ fn appendContinuation(arena: *Arena, para: *Node, s: *Scanner, setext_ok: bool) 
 }
 
 fn appendContLine(arena: *Arena, para: *Node, content: Bytes) !void {
-  const tail = blk: {
-    var t = para.children.?;
-    while (t.next) |nx| t = nx;
-    break :blk t;
-  };
-  if (tail.kind != .linebreak) appendChild(para, try newNode(arena, .{ .text = " " }));
+  if (para.last_child.?.kind != .linebreak) appendChild(para, try newNode(arena, .{ .text = " " }));
   var inl = try parseInline(arena, content);
   while (inl) |n| {
     const next = n.next;
