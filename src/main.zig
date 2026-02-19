@@ -139,14 +139,16 @@ fn handleEditor(tui: *ink.tui.Tui, path: []const u8, ctx: cli.Ctx) void {
 }
 
 fn viewLoop(tui: *ink.tui.Tui, opts: TuiOptions, ctx: cli.Ctx) !bool {
-  while (true) switch (try launchTui(tui, opts)) {
+  var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
+  defer highlighter.deinit();
+  while (true) switch (try launchTui(tui, opts, &highlighter)) {
     .quit => return true,
     .back_to_picker => return false,
     .edit => handleEditor(tui, opts.path, ctx),
   };
 }
 
-fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {
+fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions, highlighter: *ink.Highlighter) !LaunchResult {
   const alloc = tui.alloc;
   const mem = Memory.load(alloc);
 
@@ -161,9 +163,8 @@ fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {
   var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
   defer aw.deinit();
 
-  var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
   try ink.render(&aw.writer, root, .{
-    .highlighter = &highlighter,
+    .highlighter = highlighter,
     .show_urls = mem.show_urls,
     .tui = true,
   });
@@ -173,7 +174,7 @@ fn launchTui(tui: *ink.tui.Tui, opts: TuiOptions) !LaunchResult {
   return switch (try ink.tui.run(tui, rendered, opts.path, .{
     .watching = opts.watching,
     .has_picker = opts.has_picker,
-  })) {
+  }, highlighter)) {
     .quit => .quit,
     .back_to_picker => .back_to_picker,
     .edit => .edit,
@@ -224,7 +225,8 @@ fn renderNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: bo
 
   const base_dir = std.fs.path.dirname(path) orelse ".";
   var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
-  
+  defer highlighter.deinit();
+
   try ink.render(w, root, .{ 
     .highlighter = &highlighter, .margin = mem.margin, 
     .line_wrap_percent = mem.line_wrap_percent, .base_path = base_dir 
@@ -259,6 +261,8 @@ fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: boo
 
   var last_mtime: i128 = 0;
   var last_size: u64 = 0;
+  var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
+  defer highlighter.deinit();
 
   while (true) {
     const stat = std.fs.cwd().statFile(path) catch {
@@ -286,7 +290,6 @@ fn watchNormal(_: std.mem.Allocator, path: []const u8, ctx: cli.Ctx, timing: boo
       try w.writeAll("\x1b[H\x1b[2J\x1b[3J");
 
       const base_dir = std.fs.path.dirname(path) orelse ".";
-      var highlighter = try ink.Highlighter.init(std.heap.page_allocator);
       
       try ink.render(w, root, .{ 
         .highlighter = &highlighter, .margin = mem.margin, 
